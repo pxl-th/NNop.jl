@@ -1,0 +1,28 @@
+name = "NNop"
+uuid = "eeb6ee5c-f953-4f60-8482-00c4fb7bc198"
+authors = ["Anton Smirnov <tonysmn97@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+SIMD = "fdea26ae-647d-5447-a871-4b548cad5224"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
+
+[compat]
+BFloat16s = "0.5.0"
+BenchmarkTools = "1.6.0"
+GPUArrays = "11.2.1"
+NNlib = "0.9.27"
+Random = "1.11.0"
+Revise = "3.7.2"
+SIMD = "3.7.1"
+StaticArrays = "1.9.13"
+Zygote = "0.7.4"
