@@ -5,9 +5,7 @@ Pure Julia NN kernels.
 > [!WARNING]
 > The package is in the early stages and is not yet fully ready.
 
-## Ops
-
-### Flash Attention
+## Flash Attention
 
 Implementation of [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135).
 
@@ -23,7 +21,7 @@ v = ROCArray(rand(Float32, E, L, H, B))
 o = flash_attention(q, k, v)
 ```
 
-#### Benchmarks:
+### Benchmarks:
 
 For the problem size `(E=64, L=4096, H=4, B=4)`.
 
@@ -36,7 +34,7 @@ For the problem size `(E=64, L=4096, H=4, B=4)`.
 |Execution time|1.213 s|389.223 ms|
 |Peak memory usage|17.164 GiB|80.813 MiB|
 
-#### Features:
+### Features:
 
 - Forward & backward passes.
 - Arbitrary sequence length.
@@ -48,7 +46,7 @@ In progress:
 - [ ] Causal masking.
 - [ ] Variable sequence length.
 
-### Fused (online) Softmax
+## Fused (online) Softmax
 
 Implementation of [Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867).
 
