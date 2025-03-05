@@ -1,4 +1,4 @@
-@kernel cpu=false inbounds=true function _flash_attention_bwd_v2!(
+@kernel cpu=false inbounds=true function _flash_attention_bwd!(
     cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
     # Output.
     dq::AbstractArray{T, 4}, dk::AbstractArray{T, 4}, dv::AbstractArray{T, 4},
@@ -111,8 +111,41 @@
     end
 end
 
+@kernel cpu=false inbounds=true function _flash_attention_bwd_preprocess!(
+    # Output.
+    Δ_scaled::AbstractArray{T, 4},
+    δ::AbstractArray{T, 3},
+    # Input.
+    Δ::AbstractArray{T, 4},
+    o::AbstractArray{T, 4},
+    ls::AbstractArray{T, 3},
+    ::Val{emb_dim},
+) where {T, emb_dim}
+    gsz = prod(@groupsize())
 
-function ∇flash_attention_v2(
+    tidx = @index(Local)
+    gidx = @index(Group, NTuple)
+    q_offset = (gidx[1] - 1) * gsz
+
+    # Δ = Δ / ls
+    inv_denom = inv(ls[tidx + q_offset, gidx[2], gidx[3]])
+    Δ_scaled_v = @view(Δ_scaled[:, tidx + q_offset, gidx[2], gidx[3]])
+    Δ_v = @view(Δ[:, tidx + q_offset, gidx[2], gidx[3]])
+    for i in 1:emb_dim
+        Δ_scaled_v[i] = Δ_v[i] * inv_denom
+    end
+
+    # δ = sum(o * do; dims=2) # dims=2 in the (B, H, L, E) format
+    o_v = @view(o[:, tidx + q_offset, gidx[2], gidx[3]])
+    d = zero(T)
+    for i in 1:emb_dim
+        d += Δ_scaled_v[i] * o_v[i]
+    end
+    δ[tidx + q_offset, gidx[2], gidx[3]] = d
+end
+
+
+function ∇flash_attention(
     Δ::AbstractArray{T, 4},
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
@@ -171,7 +204,7 @@ function ∇flash_attention_v2(
     cfg_ds = FATileConfig{BM, BK, BN, TM, TN, true, false, false}
     @assert prod(threads) == (BM * BN) ÷ (TM * TN)
 
-    _flash_attention_bwd_v2!(kab, threads)(
+    _flash_attention_bwd!(kab, threads)(
         cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
         # Output.
         dq, dk, dv,
@@ -183,4 +216,3 @@ function ∇flash_attention_v2(
 
     return dq, dk, dv
 end
-
