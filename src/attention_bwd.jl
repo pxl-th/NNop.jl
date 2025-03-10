@@ -13,8 +13,9 @@
 ) where {T, emb_dim, n_seq_tiles}
     gsz = prod(@groupsize())
 
-    # TODO use T if it is not FP32
-    # NOTE: q, k shmem are in FP16 to fit into 64 KiB budget.
+    # TODO:
+    # - use T for q, k if we have enough shmem
+    # NOTE: q, k shmem are in FP16 to fit into 64 KiB budget on Navi 3.
     q_shm = @localmem Float16 (gsz, emb_dim)
     k_shm = @localmem Float16 (emb_dim, gsz)
     s_shm = @localmem T (gsz, gsz)
@@ -151,9 +152,9 @@ function ∇flash_attention(
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
 ) where T
     emb_dim, L, H, N = size(q)
+    gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
+    @assert gsz ≤ L
 
-    gsz = 64
-    @assert L ≥ gsz
     n_seq_tiles = cld(L, gsz)
     threads = (gsz, 1, 1)
     ndrange = (gsz * n_seq_tiles, H, N)
@@ -176,33 +177,28 @@ function ∇flash_attention(
 
     # mma config for Q' * K tile: (L_q, emb_dim) * (emb_dim, L_k).
     BM, BK, BN = gsz, emb_dim, gsz
-    TM, TN = 8, 8
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg = FATileConfig{BM, BK, BN, TM, TN, false, false, false}
-    @assert prod(threads) == (BM * BN) ÷ (TM * TN)
 
     # mma config for dv = Δ * s_shm tile: (emb_dim, L_q) * s_shm(L_q, L_k).
     BM, BK, BN = emb_dim, gsz, gsz
-    TM, TN = 8, 8
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_dv = FATileConfig{BM, BK, BN, TM, TN, false, false, false}
-    @assert prod(threads) == (BM * BN) ÷ (TM * TN)
 
     # mma config for dk
     BM, BK, BN = gsz, gsz, emb_dim
-    TM, TN = 8, 8
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_dk = FATileConfig{BM, BK, BN, TM, TN, true, false, true}
-    @assert prod(threads) == (BM * BN) ÷ (TM * TN)
 
     # mma config for dq
     BM, BK, BN = gsz, gsz, emb_dim
-    TM, TN = 8, 8
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_dq = FATileConfig{BM, BK, BN, TM, TN, false, true, true}
-    @assert prod(threads) == (BM * BN) ÷ (TM * TN)
 
     # mma config for ds
     BM, BK, BN = gsz, emb_dim, gsz
-    TM, TN = 8, 8
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_ds = FATileConfig{BM, BK, BN, TM, TN, true, false, false}
-    @assert prod(threads) == (BM * BN) ÷ (TM * TN)
 
     _flash_attention_bwd!(kab, threads)(
         cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,

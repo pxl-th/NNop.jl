@@ -191,10 +191,11 @@ end
 function flash_attention(
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
 ) where T
-    gsz = 64
     emb_dim, L, H, N = size(q)
+    # TODO LRU cache
+    gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
+    @assert gsz ≤ L
 
-    @assert L ≥ gsz
     n_seq_tiles = cld(L, gsz)
     threads = (gsz, 1, 1)
     ndrange = (gsz * n_seq_tiles, H, N)
@@ -209,15 +210,13 @@ function flash_attention(
     #
     # mma config for Q' * K tile: (L_q, emb_dim) * (emb_dim, L_k).
     BM, BK, BN = gsz, emb_dim, gsz
-    TM, TN = 8, 8
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg = FATileConfig{BM, BK, BN, TM, TN, false, false, false}
-    @assert prod(threads) == (BM * BN) ÷ (TM * TN)
 
     # mma config for (Q' * K) * V' (L_q, L_k) * (L_k, emb_dim)
     BM, BK, BN = gsz, gsz, emb_dim
-    TM, TN = 8, 8
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_out = FATileConfig{BM, BK, BN, TM, TN, false, true, true}
-    @assert prod(threads) == (BM * BN) ÷ (TM * TN)
 
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
@@ -225,6 +224,45 @@ function flash_attention(
         q, k, v,
         Val(emb_dim), Val(n_seq_tiles);
         ndrange)
-
     return o, ms, ls
+end
+
+function flash_attention_shmem_fwd(::Type{T}; emb_dim::Int, groupsize::Int)::Int where T
+    return sizeof(T) * (
+        3 * groupsize * emb_dim + # q_shm, k_shm, o_shm
+        groupsize * groupsize     # s_shm
+    )
+end
+
+function flash_attention_shmem_bwd(::Type{T};
+    emb_dim::Int, groupsize::Int, qk_fp16::Bool,
+)::Int where T
+    return sizeof(T) * (2 * groupsize * emb_dim + groupsize * groupsize) +
+        sizeof(qk_fp16 ? Float16 : Float32) * 2 * groupsize * emb_dim
+end
+
+function flash_attention_groupsize(::Type{T}; emb_dim::Int, target_shmem::Int) where T
+    # TODO
+    # - return `qk_fp16` to configure kernel
+    # - optional qk_fp16
+    # qk_fp16s = (false, true)
+    qk_fp16s = (true,)
+    for qk_fp16 in qk_fp16s, groupsize in (256, 128, 64, 32)
+        shmem = flash_attention_shmem_bwd(T; emb_dim, groupsize, qk_fp16)
+        shmem ≤ target_shmem && return groupsize
+    end
+    error("Failed to find groupsize for Flash Attention that satisfies Shared Memory constraint.")
+end
+
+function flash_attention_mma_thread_cfg(groupsize::Int; BM::Int, BN::Int)::Tuple{Int, Int}
+    tmp = (BM * BN) ÷ groupsize
+    x = Int(log2(tmp))
+    TM, TN = if iseven(x)
+        2^(x / 2), 2^(x / 2)
+    else
+        2^((x + 1) / 2), 2^((x - 1) / 2)
+    end
+
+    @assert groupsize == (BM * BN) ÷ (TM * TN)
+    return TM, TN
 end
