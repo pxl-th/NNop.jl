@@ -6,8 +6,8 @@ struct FATileConfig{BM, BK, BN, TM, TN, rev_a, rev_b, rev_c} end
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
     # Input.
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
-    ::Val{emb_dim}, ::Val{n_seq_tiles},
-) where {T, emb_dim, n_seq_tiles}
+    ::Val{emb_dim}, ::Val{kv_seq_tiles},
+) where {T, emb_dim, kv_seq_tiles}
     gsz = prod(@groupsize())
 
     # `v` shares shmem with `k`.
@@ -32,7 +32,7 @@ struct FATileConfig{BM, BK, BN, TM, TN, rev_a, rev_b, rev_c} end
     m_i = typemin(T)
     k_offset = 0
     # for _ in 1:gidx[1] # TODO use when causal
-    for _ in 1:n_seq_tiles
+    for _ in 1:kv_seq_tiles
         for i in 1:emb_dim
             k_shm[i, tidx] = k[i, tidx + k_offset, gidx[2], gidx[3]]
         end
@@ -191,19 +191,22 @@ end
 function flash_attention(
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
 ) where T
-    emb_dim, L, H, N = size(q)
+    emb_dim, QL, H, N = size(q)
+    KL = size(k, 2)
+    @assert size(k) == size(v)
     # TODO LRU cache
     gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
-    @assert gsz ≤ L
+    @assert gsz ≤ KL
 
-    n_seq_tiles = cld(L, gsz)
+    q_seq_tiles = cld(QL, gsz)
+    kv_seq_tiles = cld(KL, gsz)
     threads = (gsz, 1, 1)
-    ndrange = (gsz * n_seq_tiles, H, N)
+    ndrange = (gsz * q_seq_tiles, H, N)
 
     kab = get_backend(q)
     o = similar(q)
-    ms = KA.allocate(kab, eltype(o), (L, H, N))
-    ls = KA.allocate(kab, eltype(o), (L, H, N))
+    ms = KA.allocate(kab, eltype(o), (QL, H, N))
+    ls = KA.allocate(kab, eltype(o), (QL, H, N))
 
     # In mma, each thread processes `TM × TN` output values
     # so `TM × TN × gsz` covers the whole output tile.
@@ -222,7 +225,7 @@ function flash_attention(
         cfg, cfg_out,
         o, ms, ls,
         q, k, v,
-        Val(emb_dim), Val(n_seq_tiles);
+        Val(emb_dim), Val(kv_seq_tiles);
         ndrange)
     return o, ms, ls
 end

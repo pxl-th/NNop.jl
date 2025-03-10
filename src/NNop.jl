@@ -57,11 +57,11 @@ end
 function test_flash_attention()
     Random.seed!(0)
     T = Float32
-    E, L, H, B = 64, 4096, 4, 4
+    E, QL, KL, H, B = 64, 1024, 2048, 2, 3
 
-    q = ROCArray(rand(T, E, L, H, B))
-    k = ROCArray(rand(T, E, L, H, B))
-    v = ROCArray(rand(T, E, L, H, B))
+    q = ROCArray(rand(T, E, QL, H, B))
+    k = ROCArray(rand(T, E, KL, H, B))
+    v = ROCArray(rand(T, E, KL, H, B))
 
     on = naive_attention(q, k, v)
 
@@ -72,7 +72,7 @@ function test_flash_attention()
         sum(naive_attention(q, k, v))
     end
 
-    Δ = ROCArray(ones(T, E, L, H, B))
+    Δ = ROCArray(ones(T, E, QL, H, B))
 
     dq, dk, dv = ∇flash_attention(Δ, o, ms, ls, q, k, v)
     @assert isapprox(dq, ∇[1]; atol=1e-2, rtol=1e-2)

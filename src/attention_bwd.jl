@@ -9,8 +9,8 @@
     ms::AbstractArray{T, 3},
     ls::AbstractArray{T, 3},
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
-    ::Val{emb_dim}, ::Val{n_seq_tiles},
-) where {T, emb_dim, n_seq_tiles}
+    ::Val{emb_dim}, ::Val{q_seq_tiles}, ::Val{kv_seq_tiles},
+) where {T, emb_dim, q_seq_tiles, kv_seq_tiles}
     gsz = prod(@groupsize())
 
     # TODO:
@@ -25,7 +25,7 @@
     tidx = @index(Local)
     gidx = @index(Group, NTuple)
 
-    for start_n in 1:n_seq_tiles
+    for start_n in 1:kv_seq_tiles
         lo = (start_n - 1) * gsz
         # TODO use when causal
         # q_offset = lo
@@ -36,8 +36,8 @@
         end
 
         # TODO use when causal
-        # for start_m in start_n:n_seq_tiles
-        for start_m in 1:n_seq_tiles
+        # for start_m in start_n:kv_seq_tiles
+        for start_m in 1:q_seq_tiles
             lo_inner = (start_m - 1) * gsz
 
             for i in 1:emb_dim
@@ -151,13 +151,16 @@ function ∇flash_attention(
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
 ) where T
-    emb_dim, L, H, N = size(q)
+    emb_dim, QL, H, N = size(q)
+    KL = size(k, 2)
+    @assert size(k) == size(v)
     gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
-    @assert gsz ≤ L
+    @assert gsz ≤ QL
 
-    n_seq_tiles = cld(L, gsz)
+    q_seq_tiles = cld(QL, gsz)
+    kv_seq_tiles = cld(KL, gsz)
     threads = (gsz, 1, 1)
-    ndrange = (gsz * n_seq_tiles, H, N)
+    ndrange = (gsz * q_seq_tiles, H, N)
 
     kab = get_backend(q)
     Δ_scaled = similar(Δ)
@@ -208,7 +211,7 @@ function ∇flash_attention(
         Δ_scaled, δ,
         o, ms, ls,
         q, k, v,
-        Val(emb_dim), Val(n_seq_tiles); ndrange)
+        Val(emb_dim), Val(q_seq_tiles), Val(kv_seq_tiles); ndrange)
 
     return dq, dk, dv
 end

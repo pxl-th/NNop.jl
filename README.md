@@ -40,11 +40,11 @@ For the problem size `(E=64, L=4096, H=4, B=4)`.
 - Arbitrary sequence length.
 - Arbitrary head sizes.
 - FP32, FP16, BFP16 support.
+- Variable sequence length.
 
 In progress:
 
 - [ ] Causal masking.
-- [ ] Variable sequence length.
 
 ## Fused (online) Softmax
 
