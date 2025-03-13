@@ -49,7 +49,7 @@
             @synchronize()
 
             # recompute q' * k (L_q, L_k)
-            mma!(s_shm, q_shm, k_shm, cfg, tidx, false)
+            mma!(s_shm, q_shm, k_shm, cfg, tidx, mma_non_acc_fn)
             @synchronize()
 
             # recompute softmax dims=2
@@ -64,7 +64,7 @@
                 d_shm[i, tidx] = dv[i, tidx + lo, gidx[1], gidx[2]]
             end
             @synchronize()
-            mma!(d_shm, Δ_shm, s_shm, cfg_dv, tidx, true)
+            mma!(d_shm, Δ_shm, s_shm, cfg_dv, tidx, mma_acc_fn)
             @synchronize()
             for i in 1:emb_dim
                 dv[i, tidx + lo, gidx[1], gidx[2]] = d_shm[i, tidx]
@@ -90,7 +90,7 @@
                 d_shm[i, tidx] = dk[i, tidx + lo, gidx[1], gidx[2]]
             end
             @synchronize()
-            mma!(d_shm, s_shm, q_shm, cfg_dk, tidx, true)
+            mma!(d_shm, s_shm, q_shm, cfg_dk, tidx, mma_acc_fn)
             @synchronize()
             for i in 1:emb_dim
                 dk[i, tidx + lo, gidx[1], gidx[2]] = d_shm[i, tidx]
@@ -101,7 +101,7 @@
                 d_shm[i, tidx] = dq[i, tidx + lo_inner, gidx[1], gidx[2]]
             end
             @synchronize()
-            mma!(d_shm, s_shm, k_shm, cfg_dq, tidx, true)
+            mma!(d_shm, s_shm, k_shm, cfg_dq, tidx, mma_acc_fn)
             @synchronize()
             for i in 1:emb_dim
                 dq[i, tidx + lo_inner, gidx[1], gidx[2]] = d_shm[i, tidx]

@@ -16,6 +16,7 @@ import SIMD
 
 include("simd.jl")
 include("softmax.jl")
+include("mma.jl")
 include("attention.jl")
 include("attention_bwd.jl")
 
@@ -57,7 +58,7 @@ end
 function test_flash_attention()
     Random.seed!(0)
     T = Float32
-    E, QL, KL, H, B = 64, 1024, 2048, 2, 3
+    E, QL, KL, H, B = 64, 4096, 4096, 4, 4
 
     q = ROCArray(rand(T, E, QL, H, B))
     k = ROCArray(rand(T, E, KL, H, B))
