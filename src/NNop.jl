@@ -58,7 +58,7 @@ end
 function test_flash_attention()
     Random.seed!(0)
     T = Float32
-    E, QL, KL, H, B = 64, 1023, 1025, 1, 1
+    E, QL, KL, H, B = 64, 4094, 4094, 4, 4
 
     q = ROCArray(rand(T, E, QL, H, B))
     k = ROCArray(rand(T, E, KL, H, B))
@@ -69,50 +69,50 @@ function test_flash_attention()
     o, ms, ls = flash_attention(q, k, v)
     @assert on ≈ o
 
-    # ∇ = Zygote.gradient(q, k, v) do q, k, v
-    #     sum(naive_attention(q, k, v))
-    # end
+    ∇ = Zygote.gradient(q, k, v) do q, k, v
+        sum(naive_attention(q, k, v))
+    end
 
-    # Δ = ROCArray(ones(T, E, QL, H, B))
+    Δ = ROCArray(ones(T, E, QL, H, B))
 
-    # dq, dk, dv = ∇flash_attention(Δ, o, ms, ls, q, k, v)
-    # @assert isapprox(dq, ∇[1]; atol=1e-2, rtol=1e-2)
-    # @assert isapprox(dk, ∇[2]; atol=1e-3, rtol=1e-3)
-    # @assert isapprox(dv, ∇[3]; atol=1e-3, rtol=1e-3)
+    dq, dk, dv = ∇flash_attention(Δ, o, ms, ls, q, k, v)
+    @assert isapprox(dq, ∇[1]; atol=1e-2, rtol=1e-2)
+    @assert isapprox(dk, ∇[2]; atol=1e-3, rtol=1e-3)
+    @assert isapprox(dv, ∇[3]; atol=1e-3, rtol=1e-3)
 
-    # AMDGPU.synchronize()
-    # GC.gc(false)
-    # GC.gc(true)
+    AMDGPU.synchronize()
+    GC.gc(false)
+    GC.gc(true)
 
-    # cache = GPUArrays.AllocCache()
+    cache = GPUArrays.AllocCache()
 
-    # println("Naїve attention FWD:")
-    # @btime AMDGPU.@sync GPUArrays.@cached $cache naive_attention($q, $k, $v)
-    # println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-    # GPUArrays.unsafe_free!(cache)
+    println("Naїve attention FWD:")
+    @btime AMDGPU.@sync GPUArrays.@cached $cache naive_attention($q, $k, $v)
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
 
-    # println("Flash attention FWD:")
-    # @btime AMDGPU.@sync GPUArrays.@cached $cache flash_attention($q, $k, $v)
-    # println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-    # GPUArrays.unsafe_free!(cache)
+    println("Flash attention FWD:")
+    @btime AMDGPU.@sync GPUArrays.@cached $cache flash_attention($q, $k, $v)
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
 
-    # println("Naїve attention FWD + BWD:")
-    # @btime AMDGPU.@sync GPUArrays.@cached $cache begin
-    #     ∇ = Zygote.gradient($q, $k, $v) do q, k, v
-    #         sum(naive_attention(q, k, v))
-    #     end
-    # end
-    # println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-    # GPUArrays.unsafe_free!(cache)
+    println("Naїve attention FWD + BWD:")
+    @btime AMDGPU.@sync GPUArrays.@cached $cache begin
+        ∇ = Zygote.gradient($q, $k, $v) do q, k, v
+            sum(naive_attention(q, k, v))
+        end
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
 
-    # println("Flash attention FWD + BWD:")
-    # @btime AMDGPU.@sync GPUArrays.@cached $cache begin
-    #     o, ms, ls = flash_attention($q, $k, $v)
-    #     sum(o)
-    #     dq, dk, dv = ∇flash_attention($Δ, o, ms, ls, $q, $k, $v)
-    # end
-    # println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-    # GPUArrays.unsafe_free!(cache)
+    println("Flash attention FWD + BWD:")
+    @btime AMDGPU.@sync GPUArrays.@cached $cache begin
+        o, ms, ls = flash_attention($q, $k, $v)
+        sum(o)
+        dq, dk, dv = ∇flash_attention($Δ, o, ms, ls, $q, $k, $v)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
 
     return
 end

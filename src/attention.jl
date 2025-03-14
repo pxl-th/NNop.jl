@@ -108,7 +108,6 @@ function flash_attention(
     @assert size(k) == size(v)
     # TODO LRU cache
     gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
-    @show gsz
 
     q_seq_tiles = cld(QL, gsz)
     kv_seq_tiles = cld(KL, gsz)

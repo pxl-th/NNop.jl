@@ -25,27 +25,40 @@
     tidx = @index(Local)
     gidx = @index(Group, NTuple)
 
+    @inline function sh_load_emb!(dest, source, offset, mask, ::Val{transposed}) where transposed
+        idx = tidx + offset
+        for i in 1:emb_dim
+            x, y = transposed ? (tidx, i) : (i, tidx)
+            dest[x, y] = mask ? source[i, idx, gidx[1], gidx[2]] : zero(T)
+        end
+    end
+
     for start_n in 1:kv_seq_tiles
         lo = (start_n - 1) * gsz
         # TODO use when causal
         # q_offset = lo
         q_offset = 0
 
-        for i in 1:emb_dim
-            k_shm[i, tidx] = k[i, tidx + lo, gidx[1], gidx[2]]
-        end
+        in_k_seq_bounds = tidx + lo ≤ size(k, 2)
+        sh_load_emb!(k_shm, k, lo, in_k_seq_bounds, Val{false}())
+        # for i in 1:emb_dim
+        #     k_shm[i, tidx] = k[i, tidx + lo, gidx[1], gidx[2]]
+        # end
 
         # TODO use when causal
         # for start_m in start_n:kv_seq_tiles
         for start_m in 1:q_seq_tiles
             lo_inner = (start_m - 1) * gsz
 
-            for i in 1:emb_dim
-                Δ_shm[i, tidx] = Δ[i, tidx + q_offset, gidx[1], gidx[2]]
-            end
-            for i in 1:emb_dim
-                q_shm[tidx, i] = q[i, tidx + q_offset, gidx[1], gidx[2]]
-            end
+            in_q_seq_bounds = tidx + q_offset ≤ size(q, 2)
+            sh_load_emb!(Δ_shm, Δ, q_offset, in_q_seq_bounds, Val{false}())
+            sh_load_emb!(q_shm, q, q_offset, in_q_seq_bounds, Val{true}())
+            # for i in 1:emb_dim
+            #     Δ_shm[i, tidx] = Δ[i, tidx + q_offset, gidx[1], gidx[2]]
+            # end
+            # for i in 1:emb_dim
+            #     q_shm[tidx, i] = q[i, tidx + q_offset, gidx[1], gidx[2]]
+            # end
             @synchronize()
 
             # recompute q' * k (L_q, L_k)
@@ -60,51 +73,65 @@
             @synchronize() # TODO remove
 
             # compute dv += Δ (emb_dim, L_q) * s_shm (L_q, L_k) = (emb_dim, L_k)
-            for i in 1:emb_dim
-                d_shm[i, tidx] = dv[i, tidx + lo, gidx[1], gidx[2]]
-            end
+            in_dv_seq_bounds = tidx + lo ≤ size(dv, 2)
+            sh_load_emb!(d_shm, dv, lo, in_dv_seq_bounds, Val{false}())
+            # for i in 1:emb_dim
+            #     d_shm[i, tidx] = dv[i, tidx + lo, gidx[1], gidx[2]]
+            # end
             @synchronize()
             mma!(d_shm, Δ_shm, s_shm, cfg_dv, tidx, mma_acc_fn)
             @synchronize()
-            for i in 1:emb_dim
-                dv[i, tidx + lo, gidx[1], gidx[2]] = d_shm[i, tidx]
+            if in_dv_seq_bounds
+                for i in 1:emb_dim
+                    dv[i, tidx + lo, gidx[1], gidx[2]] = d_shm[i, tidx]
+                end
             end
 
             # compute:
             # - d = Δ' * v: (L_q, emb_dim) * (emb_dim, L_k) = (L_q, L_k)
             # - ((0 - d_i) .+ d) .* s_shm
-            for i in 1:emb_dim
-                d_shm[i, tidx] = v[i, tidx + lo, gidx[1], gidx[2]]
-            end
+            sh_load_emb!(d_shm, v, lo, in_dv_seq_bounds, Val{false}())
+            # for i in 1:emb_dim
+            #     d_shm[i, tidx] = v[i, tidx + lo, gidx[1], gidx[2]]
+            # end
             @synchronize()
             mma!(
                 s_shm, Δ_shm, d_shm, cfg_ds, tidx,
                 (out, res, x, y) -> begin
-                    d_i = δ[x + lo_inner, gidx[1], gidx[2]]
+                    d_i = x + lo_inner ≤ size(δ, 1) ?
+                        δ[x + lo_inner, gidx[1], gidx[2]] :
+                        zero(T)
                     out * (res - d_i)
                 end,
             )
 
             # dk = s_shm' * q_shm: (L_k, L_q) * (L_q, emb_dim) -> (L_k, emb_dim) -> transpose into shmem
-            for i in 1:emb_dim
-                d_shm[i, tidx] = dk[i, tidx + lo, gidx[1], gidx[2]]
-            end
+            sh_load_emb!(d_shm, dk, lo, in_k_seq_bounds, Val{false}())
+            # for i in 1:emb_dim
+            #     d_shm[i, tidx] = dk[i, tidx + lo, gidx[1], gidx[2]]
+            # end
             @synchronize()
             mma!(d_shm, s_shm, q_shm, cfg_dk, tidx, mma_acc_fn)
             @synchronize()
-            for i in 1:emb_dim
-                dk[i, tidx + lo, gidx[1], gidx[2]] = d_shm[i, tidx]
+            if in_k_seq_bounds
+                for i in 1:emb_dim
+                    dk[i, tidx + lo, gidx[1], gidx[2]] = d_shm[i, tidx]
+                end
             end
 
             # compute dq = dot(ds, k) (L_q, L_k) * (L_k, emb_dim)
-            for i in 1:emb_dim
-                d_shm[i, tidx] = dq[i, tidx + lo_inner, gidx[1], gidx[2]]
-            end
+            in_dq_seq_bounds = tidx + lo_inner ≤ size(dq, 2)
+            sh_load_emb!(d_shm, dq, lo_inner, in_dq_seq_bounds, Val{false}())
+            # for i in 1:emb_dim
+            #     d_shm[i, tidx] = dq[i, tidx + lo_inner, gidx[1], gidx[2]]
+            # end
             @synchronize()
             mma!(d_shm, s_shm, k_shm, cfg_dq, tidx, mma_acc_fn)
             @synchronize()
-            for i in 1:emb_dim
-                dq[i, tidx + lo_inner, gidx[1], gidx[2]] = d_shm[i, tidx]
+            if in_dq_seq_bounds
+                for i in 1:emb_dim
+                    dq[i, tidx + lo_inner, gidx[1], gidx[2]] = d_shm[i, tidx]
+                end
             end
 
             q_offset += gsz
@@ -127,6 +154,9 @@ end
     tidx = @index(Local)
     gidx = @index(Group, NTuple)
     q_offset = (gidx[1] - 1) * gsz
+
+    in_q_seq_bounds = tidx + q_offset ≤ size(ls, 1)
+    in_q_seq_bounds || return
 
     # Δ = Δ / ls
     inv_denom = inv(ls[tidx + q_offset, gidx[2], gidx[3]])
