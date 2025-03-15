@@ -4,8 +4,8 @@
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
     # Input.
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
-    ::Val{emb_dim}, ::Val{kv_seq_tiles},
-) where {T, emb_dim, kv_seq_tiles}
+    ::Val{emb_dim}, ::Val{kv_seq_tiles}, ::Val{seq_bounds_checking},
+) where {T, emb_dim, kv_seq_tiles, seq_bounds_checking}
     gsz = prod(@groupsize())
 
     # `v` shares shmem with `k`.
@@ -17,9 +17,9 @@
     tidx = @index(Local)
     gidx = @index(Group, NTuple)
     q_offset = (gidx[1] - 1) * gsz
-    in_q_seq_bounds = q_offset + tidx ≤ size(q, 2)
+    in_q_seq_bounds = seq_bounds_checking || q_offset + tidx ≤ size(q, 2)
 
-    @inline function sh_load_emb!(dest, source, offset, mask, ::Val{transposed}) where transposed
+    @inline function sh_load_emb!(dest, source, offset, mask::Bool, ::Val{transposed}) where transposed
         idx = tidx + offset
         for i in 1:emb_dim
             x, y = transposed ? (tidx, i) : (i, tidx)
@@ -40,7 +40,7 @@
     k_offset = 0
     # for _ in 1:gidx[1] # TODO use when causal
     for _ in 1:kv_seq_tiles
-        in_k_seq_bounds = k_offset + tidx ≤ size(k, 2)
+        in_k_seq_bounds = seq_bounds_checking || k_offset + tidx ≤ size(k, 2)
         sh_load_emb!(k_shm, k, k_offset, in_k_seq_bounds, Val{false}())
         @synchronize()
 
@@ -90,7 +90,7 @@
         k_offset += gsz
     end
 
-    if in_q_seq_bounds
+    if seq_bounds_checking || in_q_seq_bounds
         for i in 1:emb_dim
             o[i, tidx + q_offset, gidx[2], gidx[3]] = o_shm[i, tidx]
         end
@@ -132,11 +132,13 @@ function flash_attention(
     TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_out = FATileConfig{BM, BK, BN, TM, TN, false, true, true}
 
+    seq_bounds_checking = QL % gsz != 0 || KL % gsz != 0
+
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
         o, ms, ls,
         q, k, v,
-        Val(emb_dim), Val(kv_seq_tiles);
+        Val(emb_dim), Val(kv_seq_tiles), Val(seq_bounds_checking);
         ndrange)
     return o, ms, ls
 end

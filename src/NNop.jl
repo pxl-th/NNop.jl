@@ -58,7 +58,7 @@ end
 function test_flash_attention()
     Random.seed!(0)
     T = Float32
-    E, QL, KL, H, B = 64, 4094, 4094, 4, 4
+    E, QL, KL, H, B = 64, 4096, 4096, 4, 4
 
     q = ROCArray(rand(T, E, QL, H, B))
     k = ROCArray(rand(T, E, KL, H, B))
