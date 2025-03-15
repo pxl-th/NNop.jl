@@ -1,4 +1,4 @@
-@kernel cpu=false inbounds=true function _flash_attention_fwd!(
+@kernel unsafe_indices=true cpu=false inbounds=true function _flash_attention_fwd!(
     cfg, cfg_out,
     # Output.
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
@@ -20,10 +20,9 @@
     in_q_seq_bounds = in_seq_bounds || q_offset + tidx ≤ size(q, 2)
 
     @inline function sh_load_emb!(dest, source, offset, mask::Bool, ::Val{transposed}) where transposed
-        @inbounds sv = @view(source[:, tidx + offset, gidx[2], gidx[3]])
         @unroll for i in 1:emb_dim
             x, y = transposed ? (tidx, i) : (i, tidx)
-            @inbounds dest[x, y] = mask ? sv[i] : zero(T)
+            @inbounds dest[x, y] = mask ? source[i, tidx + offset, gidx[2], gidx[3]] : zero(T)
         end
     end
 
@@ -132,8 +131,7 @@ function flash_attention(
     TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_out = FATileConfig{BM, BK, BN, TM, TN, false, true, true}
 
-    in_seq_bounds = QL % gsz == 0 || KL % gsz == 0
-
+    in_seq_bounds = QL % gsz == 0 && KL % gsz == 0
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
         o, ms, ls,

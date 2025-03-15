@@ -1,15 +1,7 @@
-# TODO softmax
+# TODO
 # - boundschecking
-# - int32 indexing
 # - bwd pass (reuse from NNlib.jl)
 # - CRC integration
-# - tests
-
-function naive_softmax(x; dims = 1)
-    mx = maximum(x; dims)
-    tmp = exp.(x .- mx)
-    return tmp ./ sum(tmp; dims)
-end
 
 struct MD
     m::Float32
@@ -26,47 +18,9 @@ function md_reduce(a::MD, b::MD)::MD
 end
 
 @kernel cpu=false inbounds=true function online_softmax!(
-    y::AbstractMatrix{T}, x::AbstractMatrix{T}, ::Val{n_loop_iters},
-) where {T, n_loop_iters}
-    gsz::Int = prod(@groupsize())
-    N::Int = size(x, 1)
-
-    idx = @index(Local)
-    bid = @index(Group)
-
-    # Reposition to the current batch.
-    xv = @view(x[:, bid])
-    yv = @view(y[:, bid])
-
-    # Each thread finds its own maximum(x; dims=bid) & calculates respective denominator.
-    md_partial = MD(-Inf32, 0f0)
-    elem_id = idx
-    @unroll for i in 1:n_loop_iters
-        md_partial = md_reduce(md_partial, MD(xv[elem_id], 1f0))
-        elem_id += gsz
-    end
-
-    # Reduce to compute total max & total denominator values.
-    md = @groupreduce md_reduce md_partial
-    md_total = @localmem MD 1
-    idx == 1 && (md_total[1] = md)
-    @synchronize()
-
-    total_max = md_total[1].m
-    inv_denom = inv(md_total[1].d)
-
-    elem_id = idx
-    @unroll for i in 1:n_loop_iters
-        yv[elem_id] = exp(xv[elem_id] - total_max) * inv_denom
-        elem_id += gsz
-    end
-end
-
-@kernel cpu=false inbounds=true function online_softmax_simd!(
     y::AbstractMatrix{T}, x::AbstractMatrix{T}, ::Val{tile_size}, ::Val{n_loop_iters},
 ) where {T, tile_size, n_loop_iters}
     gsz::Int = prod(@groupsize())
-    N::Int = size(x, 1)
 
     idx = @index(Local)
     bid = @index(Group)
@@ -113,19 +67,11 @@ end
 end
 
 function online_softmax(x::T)::T where T <: AbstractMatrix
-    y = similar(x)
-    n_loop_iters = ceil(Int, size(x, 1) / 256)
-    online_softmax!(get_backend(x), 256)(
-        y, x, Val(n_loop_iters);
-        ndrange=256 * size(x, 2))
-    return y
-end
-
-function online_softmax_simd(x::T)::T where T <: AbstractMatrix
-    y = similar(x)
     tile_size = 4
+    @assert size(x, 1) % (256 * tile_size ) == 0
     n_loop_iters = ceil(Int, size(x, 1) / (256 * tile_size))
-    online_softmax_simd!(get_backend(x), 256)(
+    y = similar(x)
+    online_softmax!(get_backend(x), 256)(
         y, x, Val(tile_size), Val(n_loop_iters);
         ndrange=256 * size(x, 2))
     return y

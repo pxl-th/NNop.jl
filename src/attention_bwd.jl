@@ -1,4 +1,4 @@
-@kernel cpu=false inbounds=true function _flash_attention_bwd!(
+@kernel unsafe_indices=true cpu=false inbounds=true function _flash_attention_bwd!(
     cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
     # Output.
     dq::AbstractArray{T, 4}, dk::AbstractArray{T, 4}, dv::AbstractArray{T, 4},
@@ -7,7 +7,6 @@
     δ::AbstractArray{T, 3},
     o::AbstractArray{T, 4},
     ms::AbstractArray{T, 3},
-    ls::AbstractArray{T, 3},
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
     ::Val{emb_dim}, ::Val{q_seq_tiles}, ::Val{kv_seq_tiles}, ::Val{in_seq_bounds},
 ) where {T, emb_dim, q_seq_tiles, kv_seq_tiles, in_seq_bounds}
@@ -26,10 +25,9 @@
     gidx = @index(Group, NTuple)
 
     @inline function sh_load_emb!(dest, source, offset, mask::Bool, ::Val{transposed}) where transposed
-        @inbounds sv = @view(source[:, tidx + offset, gidx[1], gidx[2]])
         @unroll for i in 1:emb_dim
             x, y = transposed ? (tidx, i) : (i, tidx)
-            @inbounds dest[x, y] = mask ? sv[i] : zero(T)
+            @inbounds dest[x, y] = mask ? source[i, tidx + offset, gidx[1], gidx[2]] : zero(T)
         end
     end
 
@@ -57,7 +55,8 @@
             @synchronize()
 
             # recompute softmax dims=2
-            m_i = ms[tidx + lo_inner, gidx[1], gidx[2]]
+            in_ms_seq_bounds = in_seq_bounds || tidx + lo_inner ≤ size(ms, 1)
+            m_i = in_ms_seq_bounds ? ms[tidx + lo_inner, gidx[1], gidx[2]] : typemax(T)
             for i in 1:gsz
                 s_shm[tidx, i] = exp(s_shm[tidx, i] - m_i)
             end
@@ -118,7 +117,7 @@
     end
 end
 
-@kernel cpu=false inbounds=true function _flash_attention_bwd_preprocess!(
+@kernel unsafe_indices=true cpu=false inbounds=true function _flash_attention_bwd_preprocess!(
     # Output.
     Δ_scaled::AbstractArray{T, 4},
     δ::AbstractArray{T, 3},
@@ -171,7 +170,7 @@ function ∇flash_attention(
     threads = (gsz, 1, 1)
     ndrange = (gsz * q_seq_tiles, H, N)
 
-    in_seq_bounds = QL % gsz == 0 || KL % gsz == 0
+    in_seq_bounds = QL % gsz == 0 && KL % gsz == 0
 
     kab = get_backend(q)
     Δ_scaled = similar(Δ)
@@ -220,7 +219,7 @@ function ∇flash_attention(
         dq, dk, dv,
         # Input.
         Δ_scaled, δ,
-        o, ms, ls,
+        o, ms,
         q, k, v,
         Val(emb_dim), Val(q_seq_tiles), Val(kv_seq_tiles), Val(in_seq_bounds); ndrange)
 

@@ -15,10 +15,16 @@ import KernelAbstractions as KA
 import SIMD
 
 include("simd.jl")
-include("softmax.jl")
+# include("softmax.jl")
 include("mma.jl")
 include("attention.jl")
 include("attention_bwd.jl")
+
+function naive_softmax(x; dims = 1)
+    mx = maximum(x; dims)
+    tmp = exp.(x .- mx)
+    return tmp ./ sum(tmp; dims)
+end
 
 function naive_attention(q, k, v)
     kt = permutedims(k, (2, 1, 3, 4))
@@ -28,14 +34,19 @@ function naive_attention(q, k, v)
 end
 
 function test_softmax()
-    x = ROCArray(ones(Float32, 8192, 1024))
+    for seq_len in (1024, 2048)
+        x = ROCArray(rand(Float32, seq_len, 4))
+        y1 = naive_softmax(x; dims=1)
+        y2 = NNop.online_softmax(x)
+        @assert y1 ≈ y2
+    end
+
+    x = ROCArray(rand(Float32, 8192, 1024))
     cache = GPUArrays.AllocCache()
 
     y1 = naive_softmax(x; dims=1)
     y2 = online_softmax(x)
-    y3 = online_softmax_simd(x)
     @assert y1 ≈ y2
-    @assert y1 ≈ y3
 
     println("Naїve softmax:")
     @btime AMDGPU.@sync GPUArrays.@cached $cache naive_softmax($x; dims=1)
@@ -44,11 +55,6 @@ function test_softmax()
 
     println("Online softmax:")
     @btime AMDGPU.@sync GPUArrays.@cached $cache online_softmax($x)
-    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-    GPUArrays.unsafe_free!(cache)
-
-    println("Online softmax SIMD:")
-    @btime AMDGPU.@sync GPUArrays.@cached $cache online_softmax_simd($x)
     println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
     GPUArrays.unsafe_free!(cache)
 
