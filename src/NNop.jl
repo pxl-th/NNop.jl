@@ -65,7 +65,6 @@ function test_flash_attention()
     v = ROCArray(rand(T, E, KL, H, B))
 
     on = naive_attention(q, k, v)
-
     o, ms, ls = flash_attention(q, k, v)
     @assert on ≈ o
 

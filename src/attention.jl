@@ -4,9 +4,9 @@
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
     # Input.
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
-    ::Val{emb_dim}, ::Val{kv_seq_tiles},
-) where {T, emb_dim, kv_seq_tiles}
-    gsz = prod(@groupsize())
+    ::Val{emb_dim}, ::Val{kv_seq_tiles}, ::Val{in_seq_bounds},
+) where {T, emb_dim, kv_seq_tiles, in_seq_bounds}
+    gsz = @groupsize()[1]
 
     # `v` shares shmem with `k`.
     q_shm = @localmem T (gsz, emb_dim)
@@ -17,11 +17,20 @@
     tidx = @index(Local)
     gidx = @index(Group, NTuple)
     q_offset = (gidx[1] - 1) * gsz
+    in_q_seq_bounds = in_seq_bounds || q_offset + tidx ≤ size(q, 2)
+
+    @inline function sh_load_emb!(dest, source, offset, mask::Bool, ::Val{transposed}) where transposed
+        @inbounds sv = @view(source[:, tidx + offset, gidx[2], gidx[3]])
+        @unroll for i in 1:emb_dim
+            x, y = transposed ? (tidx, i) : (i, tidx)
+            @inbounds dest[x, y] = mask ? sv[i] : zero(T)
+        end
+    end
 
     # Load transposed `q` and `k` into shmem (done only once per workgroup).
     # loop idx accross emb dim, thread idx accross L dim
+    sh_load_emb!(q_shm, q, q_offset, in_q_seq_bounds, Val{true}())
     for i in 1:emb_dim
-        q_shm[tidx, i] = q[i, tidx + q_offset, gidx[2], gidx[3]]
         o_shm[i, tidx] = zero(T)
     end
     @synchronize()
@@ -31,9 +40,8 @@
     k_offset = 0
     # for _ in 1:gidx[1] # TODO use when causal
     for _ in 1:kv_seq_tiles
-        for i in 1:emb_dim
-            k_shm[i, tidx] = k[i, tidx + k_offset, gidx[2], gidx[3]]
-        end
+        in_k_seq_bounds = in_seq_bounds || k_offset + tidx ≤ size(k, 2)
+        sh_load_emb!(k_shm, k, k_offset, in_k_seq_bounds, Val{false}())
         @synchronize()
 
         # compute q' * k (L_q, L_k)
@@ -69,12 +77,10 @@
         for i in 1:emb_dim
             o_shm[i, tidx] *= o_scale
         end
-        # load `v` into `k_shm` (shared shmem).
-        for i in 1:emb_dim
-            k_shm[i, tidx] = v[i, tidx + k_offset, gidx[2], gidx[3]]
-        end
-        @synchronize()
 
+        # load `v` into `k_shm` (shared shmem).
+        sh_load_emb!(k_shm, v, k_offset, in_k_seq_bounds, Val{false}())
+        @synchronize()
         # (q' * k) * v' (L_q, emb_dim)
         mma!(o_shm, s_shm, k_shm, cfg_out, tidx, mma_acc_fn)
         @synchronize()
@@ -84,13 +90,14 @@
         k_offset += gsz
     end
 
-    for i in 1:emb_dim
-        o[i, tidx + q_offset, gidx[2], gidx[3]] = o_shm[i, tidx]
+    if in_seq_bounds || in_q_seq_bounds
+        for i in 1:emb_dim
+            o[i, tidx + q_offset, gidx[2], gidx[3]] = o_shm[i, tidx]
+        end
+        # Store for the backward pass.
+        ms[tidx + q_offset, gidx[2], gidx[3]] = m_i
+        ls[tidx + q_offset, gidx[2], gidx[3]] = l_i
     end
-
-    # Store for the backward pass.
-    ms[tidx + q_offset, gidx[2], gidx[3]] = m_i
-    ls[tidx + q_offset, gidx[2], gidx[3]] = l_i
 end
 
 function flash_attention(
@@ -101,7 +108,6 @@ function flash_attention(
     @assert size(k) == size(v)
     # TODO LRU cache
     gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
-    @assert gsz ≤ KL
 
     q_seq_tiles = cld(QL, gsz)
     kv_seq_tiles = cld(KL, gsz)
@@ -126,11 +132,13 @@ function flash_attention(
     TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_out = FATileConfig{BM, BK, BN, TM, TN, false, true, true}
 
+    in_seq_bounds = QL % gsz == 0 || KL % gsz == 0
+
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
         o, ms, ls,
         q, k, v,
-        Val(emb_dim), Val(kv_seq_tiles);
+        Val(emb_dim), Val(kv_seq_tiles), Val(in_seq_bounds);
         ndrange)
     return o, ms, ls
 end
