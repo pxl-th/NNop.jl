@@ -31,7 +31,6 @@ Base.@propagate_inbounds function mma!(
         end
         @unroll for res_idx_m in 1:TM
             @unroll for res_idx_n in 1:TN
-                # TODO use fma
                 @inbounds results[res_idx_m, res_idx_n] += reg_m[res_idx_m] * reg_n[res_idx_n]
             end
         end

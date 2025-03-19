@@ -8,6 +8,7 @@
     o::AbstractArray{T, 4},
     ms::AbstractArray{T, 3},
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
+    scale::T,
     ::Val{emb_dim}, ::Val{q_seq_tiles}, ::Val{kv_seq_tiles}, ::Val{in_seq_bounds},
 ) where {T, emb_dim, q_seq_tiles, kv_seq_tiles, in_seq_bounds}
     gsz = @groupsize()[1]
@@ -51,7 +52,7 @@
             @synchronize()
 
             # recompute q' * k (L_q, L_k)
-            mma!(s_shm, q_shm, k_shm, cfg, tidx, mma_non_acc_fn)
+            mma!(s_shm, q_shm, k_shm, cfg, tidx, (res, c_shm, x, y) -> res * scale)
             @synchronize()
 
             # recompute softmax dims=2
@@ -60,7 +61,6 @@
             for i in 1:gsz
                 s_shm[tidx, i] = exp(s_shm[tidx, i] - m_i)
             end
-            @synchronize() # TODO remove
 
             # compute dv += Δ (emb_dim, L_q) * s_shm (L_q, L_k) = (emb_dim, L_k)
             in_dv_seq_bounds = in_seq_bounds || tidx + lo ≤ size(dv, 2)
@@ -79,13 +79,15 @@
             # - ((0 - d_i) .+ d) .* s_shm
             sh_load_emb!(d_shm, v, lo, in_dv_seq_bounds, Val{false}())
             @synchronize()
+
+            # TODO prefetch `δ`
             mma!(
                 s_shm, Δ_shm, d_shm, cfg_ds, tidx,
                 (res, out, x, y) -> begin
-                    d_i = x + lo_inner ≤ size(δ, 1) ?
-                        δ[x + lo_inner, gidx[1], gidx[2]] :
+                    d_i = in_seq_bounds || x + lo_inner ≤ size(δ, 1) ?
+                        @inbounds(δ[x + lo_inner, gidx[1], gidx[2]]) :
                         zero(T)
-                    out[x, y] * (res - d_i)
+                    @inbounds out[x, y] * (res - d_i) * scale
                 end,
             )
 
@@ -160,6 +162,8 @@ function ∇flash_attention(
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
 ) where T
     emb_dim, QL, H, N = size(q)
+    scale = T(inv(sqrt(emb_dim)))
+
     KL = size(k, 2)
     @assert size(k) == size(v)
     gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
@@ -220,7 +224,7 @@ function ∇flash_attention(
         # Input.
         Δ_scaled, δ,
         o, ms,
-        q, k, v,
+        q, k, v, scale,
         Val(emb_dim), Val(q_seq_tiles), Val(kv_seq_tiles), Val(in_seq_bounds); ndrange)
 
     return dq, dk, dv

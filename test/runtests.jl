@@ -13,7 +13,7 @@ end
 
 function naive_attention(q, k, v)
     kt = permutedims(k, (2, 1, 3, 4))
-    a = kt ⊠ q
+    a = (kt ⊠ q) .* inv(sqrt(size(q, 1)))
     am = maximum(a; dims=1)
     return v ⊠ naive_softmax(a .- am; dims=1)
 end
@@ -50,7 +50,7 @@ end
         Δ = ROCArray(ones(T, E, QL, H, B))
 
         dq, dk, dv = NNop.∇flash_attention(Δ, o, ms, ls, q, k, v)
-        @test isapprox(dq, ∇[1]; atol=3e-2, rtol=3e-2)
+        @test isapprox(dq, ∇[1]; atol=1e-3, rtol=1e-3)
         @test isapprox(dk, ∇[2]; atol=1e-3, rtol=1e-3)
         @test isapprox(dv, ∇[3]; atol=1e-3, rtol=1e-3)
     end

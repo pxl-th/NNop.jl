@@ -4,6 +4,7 @@
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
     # Input.
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
+    scale::T,
     ::Val{emb_dim}, ::Val{kv_seq_tiles}, ::Val{in_seq_bounds},
 ) where {T, emb_dim, kv_seq_tiles, in_seq_bounds}
     gsz = @groupsize()[1]
@@ -44,7 +45,7 @@
         @synchronize()
 
         # compute q' * k (L_q, L_k)
-        mma!(s_shm, q_shm, k_shm, cfg, tidx, mma_non_acc_fn)
+        mma!(s_shm, q_shm, k_shm, cfg, tidx, (res, c_shm, x, y) -> res * scale)
         @synchronize()
 
         # find max(qk; dims=2)
@@ -56,6 +57,8 @@
         # compute softmax dims=2
         l_ij = zero(T)
         for i in 1:gsz
+            (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
+
             tmp = exp(s_shm[tidx, i] - m_ij)
             l_ij += tmp
             s_shm[tidx, i] = tmp
@@ -103,6 +106,8 @@ function flash_attention(
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
 ) where T
     emb_dim, QL, H, N = size(q)
+    scale = T(inv(sqrt(emb_dim)))
+
     KL = size(k, 2)
     @assert size(k) == size(v)
     # TODO LRU cache
@@ -135,7 +140,7 @@ function flash_attention(
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
         o, ms, ls,
-        q, k, v,
+        q, k, v, scale,
         Val(emb_dim), Val(kv_seq_tiles), Val(in_seq_bounds);
         ndrange)
     return o, ms, ls
