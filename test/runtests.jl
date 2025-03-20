@@ -69,15 +69,15 @@ end
         o, ms, ls = NNop.flash_attention(q, k, v; causal)
         @test isapprox(on, o; atol=1e-3, rtol=1e-3)
 
-        ∇ = Zygote.gradient(q, k, v) do q, k, v
+        ∇1 = Zygote.gradient(q, k, v) do q, k, v
             sum(naive_attention(q, k, v; causal))
         end
+        ∇2 = Zygote.gradient(q, k, v) do q, k, v
+            sum(flash_attention(q, k, v; causal))
+        end
 
-        Δ = Adapt.adapt(kab, ones(T, E, QL, H, B))
-
-        dq, dk, dv = NNop.∇flash_attention(Δ, o, ms, ls, q, k, v; causal)
-        @test isapprox(dq, ∇[1]; atol=1e-3, rtol=1e-3)
-        @test isapprox(dk, ∇[2]; atol=1e-3, rtol=1e-3)
-        @test isapprox(dv, ∇[3]; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[1], ∇2[1]; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[2], ∇2[2]; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[3], ∇2[3]; atol=1e-3, rtol=1e-3)
     end
 end

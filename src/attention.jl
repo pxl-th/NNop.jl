@@ -110,7 +110,7 @@
     end
 end
 
-function flash_attention(
+function _flash_attention(
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4};
     causal::Bool,
 ) where T

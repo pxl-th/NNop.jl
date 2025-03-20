@@ -11,6 +11,7 @@ using StaticArrays
 using Zygote
 
 import Adapt
+import ChainRulesCore
 import KernelAbstractions as KA
 import SIMD
 
@@ -20,6 +21,7 @@ include("softmax.jl")
 include("mma.jl")
 include("attention.jl")
 include("attention_bwd.jl")
+include("attention_crc.jl")
 
 function naive_softmax(x; dims = 1)
     mx = maximum(x; dims)
@@ -83,19 +85,19 @@ function test_flash_attention(kab)
     v = Adapt.adapt(kab, ones(T, E, KL, H, B))
 
     on = naive_attention(q, k, v; causal)
-    o, ms, ls = flash_attention(q, k, v; causal)
+    o = flash_attention(q, k, v; causal)
     @assert on ≈ o
 
-    ∇ = Zygote.gradient(q, k, v) do q, k, v
+    ∇1 = Zygote.gradient(q, k, v) do q, k, v
         sum(naive_attention(q, k, v; causal))
     end
+    ∇2 = Zygote.gradient(q, k, v) do q, k, v
+        sum(flash_attention(q, k, v; causal))
+    end
 
-    Δ = Adapt.adapt(kab, ones(T, E, QL, H, B))
-
-    dq, dk, dv = ∇flash_attention(Δ, o, ms, ls, q, k, v; causal)
-    @assert isapprox(dq, ∇[1]; atol=1e-3, rtol=1e-3)
-    @assert isapprox(dk, ∇[2]; atol=1e-3, rtol=1e-3)
-    @assert isapprox(dv, ∇[3]; atol=1e-3, rtol=1e-3)
+    @assert isapprox(∇1[1], ∇2[1]; atol=1e-3, rtol=1e-3)
+    @assert isapprox(∇1[2], ∇2[2]; atol=1e-3, rtol=1e-3)
+    @assert isapprox(∇1[3], ∇2[3]; atol=1e-3, rtol=1e-3)
 
     GC.gc(false)
     GC.gc(true)
@@ -130,9 +132,9 @@ function test_flash_attention(kab)
 
     println("Flash attention FWD + BWD:")
     @btime GPUArrays.@cached $cache begin
-        o, ms, ls = flash_attention($q, $k, $v; causal=$causal)
-        sum(o)
-        dq, dk, dv = ∇flash_attention($Δ, o, ms, ls, $q, $k, $v; causal=$causal)
+        Zygote.gradient($q, $k, $v) do q, k, v
+            sum(flash_attention(q, k, v; causal=$causal))
+        end
         KA.synchronize($kab)
     end
     println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
