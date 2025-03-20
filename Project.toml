@@ -4,7 +4,7 @@ authors = ["Anton Smirnov <tonysmn97@gmail.com>"]
 version = "0.1.0"
 
 [deps]
-AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
@@ -17,6 +17,7 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
 [compat]
+Adapt = "4.3.0"
 BFloat16s = "0.5.0"
 BenchmarkTools = "1.6.0"
 GPUArrays = "11.2.1"
