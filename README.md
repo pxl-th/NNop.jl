@@ -10,15 +10,17 @@ Pure Julia NN kernels.
 Implementation of [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135).
 
 ```julia
-E = 64
-L = 4096
-H, B = 4, 4
+E, L, H, B = 64, 4096, 4, 4
+causal = false
 
 q = ROCArray(rand(Float32, E, L, H, B))
 k = ROCArray(rand(Float32, E, L, H, B))
 v = ROCArray(rand(Float32, E, L, H, B))
 
-o = flash_attention(q, k, v)
+o = flash_attention(q, k, v; causal)
+∇ = Zygote.gradient(q, k, v) do q, k, v
+    sum(flash_attention(q, k, v; causal))
+end
 ```
 
 ### Benchmarks:
@@ -42,6 +44,7 @@ For the problem size `(E=64, L=4096, H=4, B=4)`.
 - FP32, FP16, BFP16 support.
 - Variable sequence length.
 - Causal masking.
+- Zygote / ChainRules integration.
 
 ## Fused (online) Softmax
 
