@@ -6,7 +6,8 @@
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
     scale::T,
     ::Val{emb_dim}, ::Val{kv_seq_tiles}, ::Val{in_seq_bounds},
-) where {T, emb_dim, kv_seq_tiles, in_seq_bounds}
+    ::Val{causal},
+) where {T, emb_dim, kv_seq_tiles, in_seq_bounds, causal}
     gsz = @groupsize()[1]
 
     # `v` shares shmem with `k`.
@@ -38,8 +39,9 @@
     l_i = zero(T)
     m_i = typemin(T)
     k_offset = 0
-    # for _ in 1:gidx[1] # TODO use when causal
-    for _ in 1:kv_seq_tiles
+
+    end_iter = causal ? gidx[1] : kv_seq_tiles
+    for _ in 1:end_iter
         in_k_seq_bounds = in_seq_bounds || k_offset + tidx ≤ size(k, 2)
         sh_load_emb!(k_shm, k, k_offset, in_k_seq_bounds, Val{false}())
         @synchronize()
@@ -47,6 +49,12 @@
         # compute q' * k (L_q, L_k)
         mma!(s_shm, q_shm, k_shm, cfg, tidx, (res, c_shm, x, y) -> res * scale)
         @synchronize()
+        if causal
+            for i in 1:gsz
+                (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
+                s_shm[tidx, i] = ifelse(tidx + q_offset ≥ i + k_offset, s_shm[tidx, i], typemin(T))
+            end
+        end
 
         # find max(qk; dims=2)
         m_ij = typemin(T)
@@ -103,7 +111,8 @@
 end
 
 function flash_attention(
-    q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
+    q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4};
+    causal::Bool,
 ) where T
     emb_dim, QL, H, N = size(q)
     scale = T(inv(sqrt(emb_dim)))
@@ -141,7 +150,7 @@ function flash_attention(
         cfg, cfg_out,
         o, ms, ls,
         q, k, v, scale,
-        Val(emb_dim), Val(kv_seq_tiles), Val(in_seq_bounds);
+        Val(emb_dim), Val(kv_seq_tiles), Val(in_seq_bounds), Val(causal);
         ndrange)
     return o, ms, ls
 end

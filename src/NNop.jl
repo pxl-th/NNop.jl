@@ -7,7 +7,7 @@ using GPUArrays
 using KernelAbstractions
 using KernelAbstractions.Extras: @unroll
 using BenchmarkTools
-using NNlib: ⊠
+using NNlib: ⊠, make_causal_mask, apply_attn_mask
 using StaticArrays
 using Zygote
 
@@ -26,9 +26,13 @@ function naive_softmax(x; dims = 1)
     return tmp ./ sum(tmp; dims)
 end
 
-function naive_attention(q, k, v)
+function naive_attention(q, k, v; causal::Bool)
     kt = permutedims(k, (2, 1, 3, 4))
     a = (kt ⊠ q) .* Float32(inv(sqrt(size(q, 1))))
+    if causal
+        m = make_causal_mask(q)
+        a = apply_attn_mask(a, m)
+    end
     am = maximum(a; dims=1)
     return v ⊠ naive_softmax(a .- am; dims=1)
 end
@@ -64,23 +68,24 @@ end
 function test_flash_attention()
     Random.seed!(0)
     T = Float32
-    E, QL, KL, H, B = 64, 4096, 4096, 1, 1
+    E, QL, KL, H, B = 64, 4096, 4096, 2, 1
+    causal = true
 
-    q = ROCArray(ones(T, E, QL, H, B))
-    k = ROCArray(ones(T, E, KL, H, B))
-    v = ROCArray(ones(T, E, KL, H, B))
+    q = ROCArray(rand(T, E, QL, H, B))
+    k = ROCArray(rand(T, E, KL, H, B))
+    v = ROCArray(rand(T, E, KL, H, B))
 
-    on = naive_attention(q, k, v)
-    o, ms, ls = flash_attention(q, k, v)
+    on = naive_attention(q, k, v; causal)
+    o, ms, ls = flash_attention(q, k, v; causal)
     @assert on ≈ o
 
     ∇ = Zygote.gradient(q, k, v) do q, k, v
-        sum(naive_attention(q, k, v))
+        sum(naive_attention(q, k, v; causal))
     end
 
     Δ = ROCArray(ones(T, E, QL, H, B))
 
-    dq, dk, dv = ∇flash_attention(Δ, o, ms, ls, q, k, v)
+    dq, dk, dv = ∇flash_attention(Δ, o, ms, ls, q, k, v; causal)
     @assert isapprox(dq, ∇[1]; atol=1e-3, rtol=1e-3)
     @assert isapprox(dk, ∇[2]; atol=1e-3, rtol=1e-3)
     @assert isapprox(dv, ∇[3]; atol=1e-3, rtol=1e-3)
@@ -92,19 +97,19 @@ function test_flash_attention()
     cache = GPUArrays.AllocCache()
 
     println("Naїve attention FWD:")
-    @btime AMDGPU.@sync GPUArrays.@cached $cache naive_attention($q, $k, $v)
+    @btime AMDGPU.@sync GPUArrays.@cached $cache naive_attention($q, $k, $v; causal=$causal)
     println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
     GPUArrays.unsafe_free!(cache)
 
     println("Flash attention FWD:")
-    @btime AMDGPU.@sync GPUArrays.@cached $cache flash_attention($q, $k, $v)
+    @btime AMDGPU.@sync GPUArrays.@cached $cache flash_attention($q, $k, $v; causal=$causal)
     println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
     GPUArrays.unsafe_free!(cache)
 
     println("Naїve attention FWD + BWD:")
     @btime AMDGPU.@sync GPUArrays.@cached $cache begin
         ∇ = Zygote.gradient($q, $k, $v) do q, k, v
-            sum(naive_attention(q, k, v))
+            sum(naive_attention(q, k, v; causal=$causal))
         end
     end
     println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
@@ -112,9 +117,9 @@ function test_flash_attention()
 
     println("Flash attention FWD + BWD:")
     @btime AMDGPU.@sync GPUArrays.@cached $cache begin
-        o, ms, ls = flash_attention($q, $k, $v)
+        o, ms, ls = flash_attention($q, $k, $v; causal=$causal)
         sum(o)
-        dq, dk, dv = ∇flash_attention($Δ, o, ms, ls, $q, $k, $v)
+        dq, dk, dv = ∇flash_attention($Δ, o, ms, ls, $q, $k, $v; causal=$causal)
     end
     println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
     GPUArrays.unsafe_free!(cache)

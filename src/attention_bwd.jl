@@ -9,8 +9,9 @@
     ms::AbstractArray{T, 3},
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
     scale::T,
-    ::Val{emb_dim}, ::Val{q_seq_tiles}, ::Val{kv_seq_tiles}, ::Val{in_seq_bounds},
-) where {T, emb_dim, q_seq_tiles, kv_seq_tiles, in_seq_bounds}
+    ::Val{emb_dim}, ::Val{q_seq_tiles}, ::Val{kv_seq_tiles},
+    ::Val{in_seq_bounds}, ::Val{causal},
+) where {T, emb_dim, q_seq_tiles, kv_seq_tiles, in_seq_bounds, causal}
     gsz = @groupsize()[1]
 
     # TODO:
@@ -34,16 +35,13 @@
 
     for start_n in 1:kv_seq_tiles
         lo = (start_n - 1) * gsz
-        # TODO use when causal
-        # q_offset = lo
-        q_offset = 0
+        q_offset = causal ? lo : 0
 
         in_k_seq_bounds = in_seq_bounds || tidx + lo ≤ size(k, 2)
         sh_load_emb!(k_shm, k, lo, in_k_seq_bounds, Val{false}())
 
-        # TODO use when causal
-        # for start_m in start_n:kv_seq_tiles
-        for start_m in 1:q_seq_tiles
+        start_iter = causal ? start_n : 1
+        for start_m in start_iter:q_seq_tiles
             lo_inner = (start_m - 1) * gsz
 
             in_q_seq_bounds = in_seq_bounds || tidx + q_offset ≤ size(q, 2)
@@ -54,6 +52,12 @@
             # recompute q' * k (L_q, L_k)
             mma!(s_shm, q_shm, k_shm, cfg, tidx, (res, c_shm, x, y) -> res * scale)
             @synchronize()
+            if causal
+                for i in 1:gsz
+                    (in_seq_bounds || i + lo ≤ size(k, 2)) || break
+                    s_shm[tidx, i] = ifelse(tidx + q_offset ≥ i + lo, s_shm[tidx, i], typemin(T))
+                end
+            end
 
             # recompute softmax dims=2
             in_ms_seq_bounds = in_seq_bounds || tidx + lo_inner ≤ size(ms, 1)
@@ -155,11 +159,11 @@ end
     δ[tidx + q_offset, gidx[2], gidx[3]] = d
 end
 
-
 function ∇flash_attention(
     Δ::AbstractArray{T, 4},
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
-    q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
+    q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4};
+    causal::Bool,
 ) where T
     emb_dim, QL, H, N = size(q)
     scale = T(inv(sqrt(emb_dim)))
@@ -167,7 +171,6 @@ function ∇flash_attention(
     KL = size(k, 2)
     @assert size(k) == size(v)
     gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
-    @assert gsz ≤ QL
 
     q_seq_tiles = cld(QL, gsz)
     kv_seq_tiles = cld(KL, gsz)
@@ -225,7 +228,8 @@ function ∇flash_attention(
         Δ_scaled, δ,
         o, ms,
         q, k, v, scale,
-        Val(emb_dim), Val(q_seq_tiles), Val(kv_seq_tiles), Val(in_seq_bounds); ndrange)
+        Val(emb_dim), Val(q_seq_tiles), Val(kv_seq_tiles),
+        Val(in_seq_bounds), Val(causal); ndrange)
 
     return dq, dk, dv
 end
