@@ -28,11 +28,11 @@ For the problem size `(E=64, L=4096, H=4, B=4)`.
 ||Naїve attention|Flash Attention|
 |-|-|-|
 |FWD|||
-|Execution time|55.034 ms|18.490 ms|
-|Peak memory usage|4.044 GiB|16.500 MiB|
+|Execution time|60.987 ms|18.380 ms|
+|Peak memory usage|5.044 GiB|16.500 MiB|
 |FWD + BWD|||
-|Execution time|1.213 s|389.223 ms|
-|Peak memory usage|17.164 GiB|80.813 MiB|
+|Execution time|1.154 s|306.960 ms|
+|Peak memory usage|19.164 GiB|80.813 MiB|
 
 ### Features:
 

@@ -1,9 +1,25 @@
-using AMDGPU
 using NNop
 using NNlib: ⊠, make_causal_mask, apply_attn_mask
 using Test
 
+import Adapt
 import Zygote
+import Pkg
+
+# ENV["NNOP_TEST_AMDGPU"] = true
+# ENV["NNOP_TEST_CUDA"] = true
+
+if get(ENV, "NNOP_TEST_AMDGPU", "false") == "true"
+    Pkg.add("AMDGPU")
+    using AMDGPU
+    kab = ROCBackend()
+elseif get(ENV, "NNOP_TEST_CUDA", "false") == "true"
+    Pkg.add("CUDA")
+    using CUDA
+    kab = CUDABackend()
+else
+    error("No GPU backend is set.")
+end
 
 function naive_softmax(x; dims = 1)
     mx = maximum(x; dims)
@@ -23,12 +39,12 @@ function naive_attention(q, k, v; causal::Bool)
 end
 
 @testset "NNop" begin
-    # @testset "Online Softmax: seq_len=$seq_len" for seq_len in (1024, 2048)
-    #     x = ROCArray(rand(Float32, seq_len, 4))
-    #     y1 = naive_softmax(x; dims=1)
-    #     y2 = NNop.online_softmax(x)
-    #     @test y1 ≈ y2
-    # end
+    @testset "Online Softmax: seq_len=$seq_len" for seq_len in (1024, 2048)
+        x = Adapt.adapt(kab, rand(Float32, seq_len, 4))
+        y1 = naive_softmax(x; dims=1)
+        y2 = NNop.online_softmax(x)
+        @test y1 ≈ y2
+    end
 
     @testset "Flash Attention: causal=$causal, T=$T, E=$E, QL=$QL, KL=$KL" for causal in (
         false, true,
@@ -45,9 +61,9 @@ end
 
         H, B = 2, 3
 
-        q = ROCArray(rand(T, E, QL, H, B))
-        k = ROCArray(rand(T, E, KL, H, B))
-        v = ROCArray(rand(T, E, KL, H, B))
+        q = Adapt.adapt(kab, rand(T, E, QL, H, B))
+        k = Adapt.adapt(kab, rand(T, E, KL, H, B))
+        v = Adapt.adapt(kab, rand(T, E, KL, H, B))
 
         on = naive_attention(q, k, v; causal)
         o, ms, ls = NNop.flash_attention(q, k, v; causal)
@@ -57,7 +73,7 @@ end
             sum(naive_attention(q, k, v; causal))
         end
 
-        Δ = ROCArray(ones(T, E, QL, H, B))
+        Δ = Adapt.adapt(kab, ones(T, E, QL, H, B))
 
         dq, dk, dv = NNop.∇flash_attention(Δ, o, ms, ls, q, k, v; causal)
         @test isapprox(dq, ∇[1]; atol=1e-3, rtol=1e-3)
