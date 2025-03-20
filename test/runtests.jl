@@ -7,13 +7,13 @@ import Zygote
 import Pkg
 
 # ENV["NNOP_TEST_AMDGPU"] = true
-ENV["NNOP_TEST_CUDA"] = true
+# ENV["NNOP_TEST_CUDA"] = true
 
-if ENV["NNOP_TEST_AMDGPU"]
+if get(ENV, "NNOP_TEST_AMDGPU", "false") == "true"
     Pkg.add("AMDGPU")
     using AMDGPU
     kab = ROCBackend()
-elseif ENV["NNOP_TEST_CUDA"]
+elseif get(ENV, "NNOP_TEST_CUDA", "false") == "true"
     Pkg.add("CUDA")
     using CUDA
     kab = CUDABackend()

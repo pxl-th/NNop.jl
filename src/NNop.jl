@@ -75,7 +75,7 @@ end
 function test_flash_attention(kab)
     Random.seed!(0)
     T = Float32
-    E, QL, KL, H, B = 64, 64, 64, 1, 1
+    E, QL, KL, H, B = 64, 4096, 4096, 4, 4
     causal = false
 
     q = Adapt.adapt(kab, ones(T, E, QL, H, B))
@@ -99,7 +99,6 @@ function test_flash_attention(kab)
 
     GC.gc(false)
     GC.gc(true)
-    return
 
     cache = GPUArrays.AllocCache()
 
