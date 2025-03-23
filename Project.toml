@@ -28,7 +28,7 @@ NNopAMDGPUExt = "AMDGPU"
 NNopCUDAExt = ["CUDA"]
 
 [compat]
-AMDGPU = "1.2"
+AMDGPU = "1.2.5"
 Adapt = "4.3.0"
 BFloat16s = "0.5.0"
 BenchmarkTools = "1.6.0"
