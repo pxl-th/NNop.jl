@@ -30,6 +30,7 @@ include("attention_crc.jl")
 
 _shared_memory(kab, device_id::Integer) = error("Not implemented.")
 
+
 function naive_softmax(x; dims = 1)
     mx = maximum(x; dims)
     tmp = exp.(x .- mx)
