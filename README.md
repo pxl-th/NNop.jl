@@ -1,8 +1,12 @@
 # NNop.jl
 
-[![][buildkite-img]][buildkite-url]
+|GPU Backend|CI Status|
+|-|-|
+|[AMDGPU](https://github.com/JuliaGPU/AMDGPU.jl)|[![][buildkite-img-amdgpu]][buildkite-url]|
+|[CUDA](https://github.com/JuliaGPU/CUDA.jl)|`in-progress`|
 
 [buildkite-img]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?branch=master
+[buildkite-img-amdgpu]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?step=AMDGPU%20-%20Julia%201.11
 [buildkite-url]: https://buildkite.com/julialang/nnop-dot-jl
 
 Pure Julia NN kernels.
@@ -45,7 +49,6 @@ For the problem size `(E=64, L=4096, H=4, B=4)`.
 
 - Forward & backward passes.
 - Arbitrary sequence length.
-- Arbitrary head sizes.
 - FP32, FP16, BFP16 support.
 - Variable sequence length.
 - Causal masking.
