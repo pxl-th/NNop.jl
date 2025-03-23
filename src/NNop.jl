@@ -9,6 +9,8 @@ using BenchmarkTools
 using NNlib: ⊠, make_causal_mask, apply_attn_mask
 using StaticArrays
 using Zygote
+using Memoize: @memoize
+using LRUCache: LRU
 
 import Adapt
 import ChainRulesCore
@@ -22,6 +24,12 @@ include("mma.jl")
 include("attention.jl")
 include("attention_bwd.jl")
 include("attention_crc.jl")
+
+@memoize LRU{Tuple{Any, Integer}, UInt64}(maxsize=32) shared_memory(kab, device_id::Integer) =
+    _shared_memory(kab, device_id)
+
+_shared_memory(kab, device_id::Integer) = error("Not implemented.")
+
 
 function naive_softmax(x; dims = 1)
     mx = maximum(x; dims)

@@ -10,6 +10,8 @@ BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
 GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+LRUCache = "8ac3fa9e-de4c-5943-b1dc-09c6b5f20637"
+Memoize = "c03570c3-d221-55d1-a50c-7939bbd78826"
 NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
@@ -17,12 +19,24 @@ SIMD = "fdea26ae-647d-5447-a871-4b548cad5224"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 
+[weakdeps]
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+
+[extensions]
+NNopAMDGPUExt = "AMDGPU"
+NNopCUDAExt = ["CUDA"]
+
 [compat]
+AMDGPU = "1.2.5"
 Adapt = "4.3.0"
 BFloat16s = "0.5.0"
 BenchmarkTools = "1.6.0"
+CUDA = "5"
 ChainRulesCore = "1.25.1"
 GPUArrays = "11.2.1"
+LRUCache = "1.6.2"
+Memoize = "0.4.4"
 NNlib = "0.9.27"
 Random = "1.11.0"
 Revise = "3.7.2"
