@@ -170,7 +170,10 @@ function ∇flash_attention(
 
     KL = size(k, 2)
     @assert size(k) == size(v)
-    gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
+
+    kab = get_backend(q)
+    target_shmem = shared_memory(kab, KA.device(kab))
+    gsz = flash_attention_groupsize(T; emb_dim, target_shmem)
 
     q_seq_tiles = cld(QL, gsz)
     kv_seq_tiles = cld(KL, gsz)

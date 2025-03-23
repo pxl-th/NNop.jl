@@ -119,15 +119,16 @@ function _flash_attention(
 
     KL = size(k, 2)
     @assert size(k) == size(v)
-    # TODO LRU cache
-    gsz = flash_attention_groupsize(T; emb_dim, target_shmem=64 * 1024) # TODO query available shmem
+
+    kab = get_backend(q)
+    target_shmem = shared_memory(kab, KA.device(kab))
+    gsz = flash_attention_groupsize(T; emb_dim, target_shmem)
 
     q_seq_tiles = cld(QL, gsz)
     kv_seq_tiles = cld(KL, gsz)
     threads = (gsz, 1, 1)
     ndrange = (gsz * q_seq_tiles, H, N)
 
-    kab = get_backend(q)
     o = similar(q)
     ms = KA.allocate(kab, eltype(o), (QL, H, N))
     ls = KA.allocate(kab, eltype(o), (QL, H, N))
@@ -169,11 +170,12 @@ function flash_attention_shmem_bwd(::Type{T};
         sizeof(qk_fp16 ? Float16 : Float32) * 2 * groupsize * emb_dim
 end
 
-function flash_attention_groupsize(::Type{T}; emb_dim::Int, target_shmem::Int) where T
+function flash_attention_groupsize(::Type{T}; emb_dim::Int, target_shmem::UInt64) where T
     # TODO
     # - return `qk_fp16` to configure kernel
     # - optional qk_fp16
     # qk_fp16s = (false, true)
+    # TODO prefer bigger groupsize?
     qk_fp16s = (true,)
     for qk_fp16 in qk_fp16s, groupsize in (256, 128, 64, 32)
         shmem = flash_attention_shmem_bwd(T; emb_dim, groupsize, qk_fp16)
