@@ -115,6 +115,8 @@ function _flash_attention(
     causal::Bool,
 ) where T
     emb_dim, QL, H, N = size(q)
+    ispow2(emb_dim) || error(
+        "Only power-of-2 embedding dim sizes are supported, instead `$emb_dim` was given.")
     scale = T(inv(sqrt(emb_dim)))
 
     KL = size(k, 2)
