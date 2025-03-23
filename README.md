@@ -1,5 +1,10 @@
 # NNop.jl
 
+[![][buildkite-img]][buildkite-url]
+
+[buildkite-img]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?branch=master
+[buildkite-url]: https://buildkite.com/julialang/nnop-dot-jl
+
 Pure Julia NN kernels.
 
 > [!WARNING]
