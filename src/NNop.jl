@@ -49,11 +49,19 @@ function naive_attention(q, k, v; causal::Bool)
 end
 
 function test_softmax(kab)
-    for seq_len in (1024, 2048)
+    for seq_len in (32, 33, 63, 255, 256, 512, 1024, 2048)
         x = Adapt.adapt(kab, rand(Float32, seq_len, 4))
         y1 = naive_softmax(x; dims=1)
         y2 = NNop.online_softmax(x)
         @assert y1 ≈ y2
+
+        ∇1 = Zygote.gradient(x) do x
+            sum(naive_softmax(x))
+        end
+        ∇2 = Zygote.gradient(x) do x
+            sum(online_softmax(x))
+        end
+        @assert isapprox(∇1[1], ∇2[1]; atol=1f-6, rtol=1f-6)
     end
 
     x = Adapt.adapt(kab, rand(Float32, 8192, 1024))

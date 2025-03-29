@@ -1,8 +1,3 @@
-# TODO
-# - boundschecking
-# - bwd pass (reuse from NNlib.jl)
-# - CRC integration
-
 struct MD
     m::Float32
     d::Float32
@@ -11,16 +6,21 @@ end
 function md_reduce(a::MD, b::MD)::MD
     a_bigger = a.m > b.m
     bigger_m, smaller_m = a_bigger ? (a, b) : (b, a)
+    diff = smaller_m.m - bigger_m.m
+    # Avoid NaN in output.
+    diff = ifelse(isnan(diff), -Inf32, diff)
     return MD(
         bigger_m.m,
-        bigger_m.d + smaller_m.d * exp(smaller_m.m - bigger_m.m),
+        bigger_m.d + smaller_m.d * exp(diff),
     )
 end
 
+
 @kernel cpu=false inbounds=true function online_softmax!(
-    y::AbstractMatrix{T}, x::AbstractMatrix{T}, ::Val{tile_size}, ::Val{n_loop_iters},
-) where {T, tile_size, n_loop_iters}
+    y::AbstractMatrix{T}, x::AbstractMatrix{T}, ::Val{n_loop_iters}, ::Val{in_seq_bounds},
+) where {T, n_loop_iters, in_seq_bounds}
     gsz::Int = prod(@groupsize())
+    N::Int = size(x, 1)
 
     idx = @index(Local)
     bid = @index(Group)
@@ -33,11 +33,8 @@ end
     md_partial = MD(-Inf32, 0f0)
     elem_id = idx
     @unroll for i in 1:n_loop_iters
-        # Each thread loads & accumulates `tile_size` adjacent elements.
-        ptr = pointer(xv, (elem_id - 1) * tile_size + 1)
-        xv_tile = vload(SIMD.Vec{tile_size, T}, ptr)
-        @unroll for j in 1:tile_size
-            md_partial = md_reduce(md_partial, MD(xv_tile[j], 1f0))
+        if in_seq_bounds || elem_id ≤ size(x, 1)
+            md_partial = md_reduce(md_partial, MD(xv[elem_id], 1f0))
         end
         elem_id += gsz
     end
@@ -53,26 +50,39 @@ end
 
     elem_id = idx
     @unroll for i in 1:n_loop_iters
-        tile_idx = (elem_id - 1) * tile_size + 1
-
-        xv_ptr = pointer(xv, tile_idx)
-        xv_tile = vload(SIMD.Vec{tile_size, T}, xv_ptr)
-        xv_tile = exp(xv_tile - total_max) * inv_denom
-
-        yv_ptr = pointer(yv, tile_idx)
-        vstore!(yv_ptr, xv_tile)
-
+        if in_seq_bounds || elem_id ≤ size(x, 1)
+            yv[elem_id] = exp(xv[elem_id] - total_max) * inv_denom
+        end
         elem_id += gsz
     end
 end
 
 function online_softmax(x::T)::T where T <: AbstractMatrix
-    tile_size = 4
-    @assert size(x, 1) % (256 * tile_size ) == 0
-    n_loop_iters = ceil(Int, size(x, 1) / (256 * tile_size))
     y = similar(x)
-    online_softmax!(get_backend(x), 256)(
-        y, x, Val(tile_size), Val(n_loop_iters);
-        ndrange=256 * size(x, 2))
+    gsz = 256
+    n_loop_iters = ceil(Int, size(x, 1) / gsz)
+    in_seq_bounds = size(x, 1) % gsz == 0
+    ndrange = gsz * size(x, 2)
+    online_softmax!(get_backend(x), gsz)(y, x, Val(n_loop_iters), Val(in_seq_bounds); ndrange)
     return y
+end
+
+function ∇online_softmax(Δ::AbstractArray{T}, y::AbstractArray{S}) where {T, S}
+    dx = if within_gradient(y)
+        tmp = Δ .* y
+        tmp .- y .* sum(tmp; dims=1)
+    else
+        # This path is faster, only safe for 1st derivatives though.
+        out = similar(y, promote_type(T, S))
+        out .= Δ .* y
+        out .= out .- y .* sum(out; dims=1)
+    end
+end
+
+function ChainRulesCore.rrule(::typeof(online_softmax), x)
+    y = online_softmax(x)
+    _pullback(Δ) = (
+        ChainRulesCore.NoTangent(),
+        ∇online_softmax(ChainRulesCore.unthunk(Δ), y))
+    return y, _pullback
 end
