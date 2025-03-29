@@ -53,7 +53,7 @@ end
             sum(naive_softmax(x))
         end
         ∇2 = Zygote.gradient(x) do x
-            sum(online_softmax(x))
+            sum(NNop.online_softmax(x))
         end
         @assert isapprox(∇1[1], ∇2[1]; atol=1f-6, rtol=1f-6)
     end
