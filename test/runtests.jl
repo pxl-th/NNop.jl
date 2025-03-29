@@ -41,7 +41,7 @@ end
 @testset "NNop" begin
     @testset "Online Softmax: T=$T, seq_len=$seq_len" for T in (
         Float32, # TODO more types
-    ) for seq_len in (
+    ), seq_len in (
         32, 33, 63, 255, 256, 511, 512, 513, 1024,
     )
         x = Adapt.adapt(kab, rand(Float32, seq_len, 4))
