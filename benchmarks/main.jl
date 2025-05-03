@@ -30,15 +30,23 @@ function naive_rms_norm(x, w; ϵ)
 end
 
 function test_rms_norm(kab)
-    x = Adapt.adapt(kab, ones(Float32, 256, 1))
-    w = Adapt.adapt(kab, ones(Float32, 256))
+    emb, n = 512, 5
+    x = Adapt.adapt(kab, rand(Float32, emb, n))
+    w = Adapt.adapt(kab, rand(Float32, emb))
 
     y1 = naive_rms_norm(x, w; ϵ=1f-6)
-    y2 = NNop.rms_norm(x, w; ϵ=1f-6)
-    @show y1
-    @show y2
+    y2, rms = NNop._rms_norm(x, w; ϵ=1f-6)
     @assert y1 ≈ y2
 
+    Δ = Adapt.adapt(kab, ones(size(x)))
+    dx, dw = NNop.∇rms_norm(Δ, rms, x, w; offset=0f0)
+
+    ∇ = Zygote.gradient(x, w) do x, w
+        sum(naive_rms_norm(x, w; ϵ=1f-6))
+    end
+
+    @assert isapprox(∇[1], dx; atol=1f-6, rtol=1f-6)
+    @assert isapprox(∇[2], dw; atol=1f-6, rtol=1f-6)
     return
 end
 
