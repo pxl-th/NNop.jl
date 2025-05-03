@@ -25,6 +25,23 @@ function naive_attention(q, k, v; causal::Bool)
     return v ⊠ naive_softmax(a .- am; dims=1)
 end
 
+function naive_rms_norm(x, w; ϵ)
+    w .* x ./ sqrt.(mean(x.^2; dims=1) .+ ϵ)
+end
+
+function test_rms_norm(kab)
+    x = Adapt.adapt(kab, ones(Float32, 256, 1))
+    w = Adapt.adapt(kab, ones(Float32, 256))
+
+    y1 = naive_rms_norm(x, w; ϵ=1f-6)
+    y2 = NNop.rms_norm(x, w; ϵ=1f-6)
+    @show y1
+    @show y2
+    @assert y1 ≈ y2
+
+    return
+end
+
 function test_softmax(kab)
     for seq_len in (32, 33, 63, 255, 256, 512, 1024, 2048)
         x = Adapt.adapt(kab, rand(Float32, seq_len, 4))
@@ -45,7 +62,7 @@ function test_softmax(kab)
     cache = GPUArrays.AllocCache()
 
     y1 = naive_softmax(x; dims=1)
-    y2 = online_softmax(x)
+    y2 = NNop.online_softmax(x)
     @assert y1 ≈ y2
 
     println("Naїve softmax:")

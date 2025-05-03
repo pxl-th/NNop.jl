@@ -19,7 +19,7 @@ end
 @kernel cpu=false inbounds=true function online_softmax!(
     y::AbstractMatrix{T}, x::AbstractMatrix{T}, ::Val{n_loop_iters}, ::Val{in_seq_bounds},
 ) where {T, n_loop_iters, in_seq_bounds}
-    gsz::Int = prod(@groupsize())
+    gsz::Int = @groupsize()[1]
     N::Int = size(x, 1)
 
     idx = @index(Local)
