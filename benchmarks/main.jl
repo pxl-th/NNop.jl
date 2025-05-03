@@ -7,6 +7,7 @@ using Random
 using GPUArrays
 
 import Adapt
+import KernelAbstractions as KA
 
 function naive_softmax(x; dims = 1)
     mx = maximum(x; dims)
@@ -23,6 +24,68 @@ function naive_attention(q, k, v; causal::Bool)
     end
     am = maximum(a; dims=1)
     return v ⊠ naive_softmax(a .- am; dims=1)
+end
+
+function naive_rms_norm(x, w; offset::Float32 = 0f0, ϵ::Float32 = 1f-6)
+    (w .+ offset) .* x ./ sqrt.(mean(x.^2; dims=1) .+ ϵ)
+end
+
+function test_rms_norm(kab)
+    emb, n = 1024, 1024
+    x = Adapt.adapt(kab, rand(Float32, emb, n))
+    w = Adapt.adapt(kab, rand(Float32, emb))
+
+    y1 = naive_rms_norm(x, w; ϵ=1f-6)
+    y2 = NNop.rms_norm(x, w; ϵ=1f-6)
+    @assert y1 ≈ y2
+
+    ∇n = Zygote.gradient(x, w) do x, w
+        sum(naive_rms_norm(x, w; offset=1f0))
+    end
+    ∇f = Zygote.gradient(x, w) do x, w
+        sum(NNop.rms_norm(x, w; offset=1f0))
+    end
+    @assert isapprox(∇n[1], ∇f[1]; atol=1f-6, rtol=1f-6)
+    @assert isapprox(∇n[2], ∇f[2]; atol=1f-6, rtol=1f-6)
+
+    cache = GPUArrays.AllocCache()
+
+    println("Naїve RMS norm:")
+    @btime GPUArrays.@cached $cache begin
+        naive_rms_norm($x, $w)
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Fused RMS norm:")
+    @btime GPUArrays.@cached $cache begin
+        NNop.rms_norm($x, $w)
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Naїve RMS norm fwd + bwd:")
+    @btime GPUArrays.@cached $cache begin
+        Zygote.gradient($x, $w) do x, w
+            sum(naive_rms_norm(x, w))
+        end
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Fused RMS norm fwd + bwd:")
+    @btime GPUArrays.@cached $cache begin
+        Zygote.gradient($x, $w) do x, w
+            sum(NNop.rms_norm(x, w))
+        end
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+    return
 end
 
 function test_softmax(kab)
@@ -45,7 +108,7 @@ function test_softmax(kab)
     cache = GPUArrays.AllocCache()
 
     y1 = naive_softmax(x; dims=1)
-    y2 = online_softmax(x)
+    y2 = NNop.online_softmax(x)
     @assert y1 ≈ y2
 
     println("Naїve softmax:")

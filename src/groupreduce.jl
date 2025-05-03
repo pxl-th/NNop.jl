@@ -20,24 +20,24 @@ end
 function __thread_groupreduce(__ctx__, op, val::T, ::Val{groupsize}) where {T, groupsize}
     storage = @localmem T groupsize
 
-    local_idx = @index(Local)
-    @inbounds local_idx ≤ groupsize && (storage[local_idx] = val)
+    lidx = @index(Local)
+    @inbounds lidx ≤ groupsize && (storage[lidx] = val)
     @synchronize()
 
     s::UInt64 = groupsize ÷ 0x02
     while s > 0x00
-        if (local_idx - 0x01) < s
-            other_idx = local_idx + s
+        if (lidx - 0x01) < s
+            other_idx = lidx + s
             if other_idx ≤ groupsize
-                @inbounds storage[local_idx] = op(storage[local_idx], storage[other_idx])
+                @inbounds storage[lidx] = op(storage[lidx], storage[other_idx])
             end
         end
         @synchronize()
         s >>= 0x01
     end
 
-    if local_idx == 0x01
-        @inbounds val = storage[local_idx]
+    if lidx == 0x01
+        @inbounds val = storage[lidx]
     end
     return val
 end
