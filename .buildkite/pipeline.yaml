@@ -33,4 +33,3 @@ steps:
     env:
       JULIA_NUM_THREADS: 4
       NNOP_TEST_CUDA: true
-    soft_fail: true # TODO remove
