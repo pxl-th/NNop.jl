@@ -14,9 +14,7 @@ function ChainRulesCore.rrule(::typeof(_flash_attention), q, k, v; causal::Bool)
         dq, dk, dv = ∇flash_attention(
             ChainRulesCore.unthunk(Δ),
             o, ms, ls, q, k, v; causal)
-        return (
-            ChainRulesCore.NoTangent(),
-            dq, dk, dv)
+        return ChainRulesCore.NoTangent(), dq, dk, dv
     end
     return o, _pullback
 end

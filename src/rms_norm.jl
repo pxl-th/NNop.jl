@@ -1,3 +1,5 @@
+# TODO rounding modes
+
 @kernel cpu=false inbounds=true function _rms_norm!(
     y, rms, x, w, offset::Float32,
     inv_emb_size::Float32, ϵ::Float32,
@@ -11,11 +13,11 @@
     xv = @view(x[:, bid])
     yv = @view(y[:, bid])
 
-    partial = 0f0
+    partial::Float32 = 0f0
     elem_id = idx
     @unroll for i in 1:n_loop_iters
         if in_seq_bounds || elem_id ≤ size(x, 1)
-            partial += xv[elem_id]^2
+            partial += Float32(xv[elem_id])^2
         end
         elem_id += gsz
     end
@@ -29,7 +31,7 @@
     elem_id = idx
     @unroll for i in 1:n_loop_iters
         if in_seq_bounds || elem_id ≤ size(x, 1)
-            yv[elem_id] = (offset + w[elem_id]) * xv[elem_id] * rstd
+            yv[elem_id] = (offset + Float32(w[elem_id])) * Float32(xv[elem_id]) * rstd
         end
         elem_id += gsz
     end
@@ -77,7 +79,7 @@ end
         elem_id = idx
         @unroll for _ in 1:n_loop_iters
             δ, w_i, x_i = in_seq_bounds || elem_id ≤ size(x, 1) ?
-                (Δ[elem_id, i], w[elem_id], x[elem_id, i]) :
+                (Float32(Δ[elem_id, i]), Float32(w[elem_id]), Float32(x[elem_id, i])) :
                 (0f0, 0f0, 0f0)
             dd += δ * (w_i + offset) * x_i
             elem_id += gsz
@@ -92,7 +94,7 @@ end
         elem_id = idx
         @unroll for _ in 1:n_loop_iters
             δ, w_i, x_i = in_seq_bounds || elem_id ≤ size(x, 1) ?
-                (Δ[elem_id, i], w[elem_id], x[elem_id, i]) :
+                (Float32(Δ[elem_id, i]), Float32(w[elem_id]), Float32(x[elem_id, i])) :
                 (0f0, 0f0, 0f0)
 
             # Compute `dx`.
@@ -146,13 +148,10 @@ function ∇rms_norm(Δ, rms, x, w; offset::Float32)
     emb, n = size(x)
     batches_per_groupsize = 4 # TODO == sm_count, query
     n_batch_loop_iters = ceil(Int, n / batches_per_groupsize)
-    @show batches_per_groupsize
-    @show n_batch_loop_iters
 
     kab = get_backend(x)
     dx = KA.allocate(kab, eltype(x), size(x))
     dw = KA.allocate(kab, Float32, (n_batch_loop_iters, emb))
-    @show size(dw)
 
     gsz = 256
     ndrange = gsz * n_batch_loop_iters
@@ -160,12 +159,7 @@ function ∇rms_norm(Δ, rms, x, w; offset::Float32)
 
     in_seq_bounds = size(x, 1) % gsz == 0
     n_loop_iters = ceil(Int, emb / gsz)
-    @show in_seq_bounds
-    @show n_loop_iters
-    @show ndrange
-
     emb_sh_size = cld(emb, gsz) * gsz
-    @show emb_sh_size
 
     _∇rms_norm!(kab, gsz)(
         dx, dw,
@@ -179,4 +173,20 @@ function ∇rms_norm(Δ, rms, x, w; offset::Float32)
         reshape(sum(dw; dims=1), :) # TODO have dedicated kernel that reduces over `sm_count`
     end
     return dx, dw
+end
+
+function rms_norm(x, w; ϵ::Float32 = 1f-6, offset::Float32 = 0f0)
+    y = _rms_norm(x, w; ϵ, offset)
+    within_gradient(x) && return y
+    @assert length(y) == 2
+    return y[1]
+end
+
+function ChainRulesCore.rrule(::typeof(_rms_norm), x, w; ϵ::Float32 = 1f-6, offset::Float32 = 0f0)
+    y, rms = _rms_norm(x, w; ϵ, offset)
+    function _pullback(Δ)
+        dx, dw = ∇rms_norm(ChainRulesCore.unthunk(Δ), rms, x, w; offset)
+        return ChainRulesCore.NoTangent(), dx, dw
+    end
+    return y, _pullback
 end
