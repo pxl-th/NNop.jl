@@ -27,9 +27,9 @@ q = ROCArray(rand(Float32, E, L, H, B))
 k = ROCArray(rand(Float32, E, L, H, B))
 v = ROCArray(rand(Float32, E, L, H, B))
 
-o = flash_attention(q, k, v; causal)
+o = NNop.flash_attention(q, k, v; causal)
 ∇ = Zygote.gradient(q, k, v) do q, k, v
-    sum(flash_attention(q, k, v; causal))
+    sum(NNop.flash_attention(q, k, v; causal))
 end
 ```
 
@@ -60,11 +60,31 @@ For the problem size `(E=64, L=4096, H=4, B=4)`.
 Implementation of [Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867).
 
 ```julia
-x = ROCArray(ones(Float32, 8192, 1024))
-y = online_softmax(x)
+x = ROCArray(rand(Float32, 8192, 1024))
+y = NNop.online_softmax(x)
 ```
 
 ||Naїve Softmax|Online Softmax|
 |-|-|-|
 |Execution time|745.123 μs|61.600 μs|
 |Peak memory usage|64.258 MiB|32.000 MiB|
+
+## Fused RMS Norm
+
+```julia
+x = ROCArray(rand(Float32, 1024, 1024))
+w = ROCArray(rand(Float32, 1024))
+y = NNop.rms_norm(x, w)
+∇ = Zygote.gradient(x, w) do x, w
+    sum(NNop.rms_norm(x, w))
+end
+```
+
+||Naїve RMS Norm|Fused RMS Norm|
+|-|-|-|
+|FWD|||
+|Execution time|171.124 μs|48.432 μs|
+|Peak memory usage|8.004 MiB|4.004 MiB|
+|FWD + BWD|||
+|Execution time|902.919 μs|241.838 μs|
+|Peak memory usage|44.043 MiB|13.008 MiB|
