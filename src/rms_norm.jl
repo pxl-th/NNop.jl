@@ -1,6 +1,6 @@
 # TODO rounding modes
 
-@kernel cpu=false inbounds=true function _rms_norm!(
+@kernel cpu=false unsafe_indices=true inbounds=true function _rms_norm!(
     y, rms, x, w, offset::Float32,
     inv_emb_size::Float32, ϵ::Float32,
     ::Val{in_seq_bounds}, ::Val{n_loop_iters},
@@ -15,21 +15,21 @@
 
     partial::Float32 = 0f0
     elem_id = idx
-    @unroll for i in 1:n_loop_iters
+    @unroll for _ in 1:n_loop_iters
         if in_seq_bounds || elem_id ≤ size(x, 1)
             partial += Float32(xv[elem_id])^2
         end
         elem_id += gsz
     end
     partial *= inv_emb_size
-
     avg = @groupreduce(+, partial)
+
     idx == 1 && (rms[bid] = inv(sqrt(avg + ϵ)))
     @synchronize()
     rstd = rms[bid] # Reload to all threads.
 
     elem_id = idx
-    @unroll for i in 1:n_loop_iters
+    @unroll for _ in 1:n_loop_iters
         if in_seq_bounds || elem_id ≤ size(x, 1)
             yv[elem_id] = (offset + Float32(w[elem_id])) * Float32(xv[elem_id]) * rstd
         end
@@ -38,12 +38,9 @@
 end
 
 # dd = (dy * (w + offset)) ⋅ x
-# dx = (1 / RMS) * [dd * x * dy * (w + offset - (1 / N) * (1 / RMS^2)]
+# dx = (1 / RMS) * (dd * x * dy * (w + offset - (1 / N) * (1 / RMS²))
 # dw = sum(dy * (x / RMS)) - summation over n_batch_loop_iters
-#
-# * means element-wise multiplication
-# ⋅ means dot product: sum(x * w)
-@kernel cpu=false inbounds=true function _∇rms_norm!(
+@kernel cpu=false unsafe_indices=true inbounds=true function _∇rms_norm!(
     dx::AbstractMatrix, dw::AbstractMatrix,
     Δ::AbstractMatrix, rms::AbstractVector, x::AbstractMatrix, w::AbstractVector,
     offset::Float32, inv_emb_size::Float32, batches_per_groupsize::Int,
@@ -170,7 +167,8 @@ function ∇rms_norm(Δ, rms, x, w; offset::Float32)
     dw = if n_batch_loop_iters == 1
         reshape(dw, :)
     else
-        reshape(sum(dw; dims=1), :) # TODO have dedicated kernel that reduces over `sm_count`
+        # TODO dedicated kernel that reduces over `sm_count`
+        reshape(sum(dw; dims=1), :)
     end
     return dx, dw
 end
