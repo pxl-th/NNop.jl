@@ -44,22 +44,24 @@ end
     dx::AbstractMatrix, dw::AbstractMatrix,
     Δ::AbstractMatrix, rms::AbstractVector, x::AbstractMatrix, w::AbstractVector,
     offset::Float32, inv_emb_size::Float32, batches_per_groupsize::Int,
-    ::Val{emb_sh_size}, ::Val{in_seq_bounds}, ::Val{n_loop_iters},
-) where {emb_sh_size, in_seq_bounds, n_loop_iters}
+    ::Val{emb}, ::Val{in_seq_bounds}, ::Val{n_loop_iters},
+) where {emb, in_seq_bounds, n_loop_iters}
     n = size(x, 2)
 
     gsz = @groupsize()[1]
     idx = @index(Local)
     bid = @index(Group)
 
-    dw_sh = @localmem Float32 emb_sh_size
+    dw_sh = @localmem Float32 emb
     dd_sh = @localmem Float32 1
     dd::Float32 = 0f0 # Define at the top to avoid weird divergence.
 
     # Init shmem to 0.
     elem_id = idx
     @unroll for _ in 1:n_loop_iters
-        dw_sh[elem_id] = 0f0
+        if in_seq_bounds || elem_id ≤ emb
+            dw_sh[elem_id] = 0f0
+        end
         elem_id += gsz
     end
     @synchronize()
@@ -67,53 +69,46 @@ end
     ns = (bid - 1) * batches_per_groupsize + 1
     ne = min(n, bid * batches_per_groupsize)
     for i in ns:ne
-        # Init shmem to 0 (for every batch).
-        idx == 1 && (dd_sh[1] = 0f0)
-        @synchronize()
-
         # Compute `dd = (dy * (w + offset)) ⋅ x`.
         dd = 0f0 # Reset to 0.
         elem_id = idx
         @unroll for _ in 1:n_loop_iters
-            δ, w_i, x_i = in_seq_bounds || elem_id ≤ size(x, 1) ?
-                (Float32(Δ[elem_id, i]), Float32(w[elem_id]), Float32(x[elem_id, i])) :
-                (0f0, 0f0, 0f0)
-            dd += δ * (w_i + offset) * x_i
+            if in_seq_bounds || elem_id ≤ emb
+                δ, w_i, x_i = Float32(Δ[elem_id, i]), Float32(w[elem_id]), Float32(x[elem_id, i])
+                dd += δ * (w_i + offset) * x_i
+            end
             elem_id += gsz
         end
 
         dd_red = @groupreduce(+, dd)
-        idx == 1 && (dd_sh[1] += dd_red)
+        idx == 1 && (dd_sh[1] = dd_red)
         @synchronize()
 
         dd = dd_sh[1] # Reload to all threads.
         rstd = rms[i]
         elem_id = idx
         @unroll for _ in 1:n_loop_iters
-            δ, w_i, x_i = in_seq_bounds || elem_id ≤ size(x, 1) ?
-                (Float32(Δ[elem_id, i]), Float32(w[elem_id]), Float32(x[elem_id, i])) :
-                (0f0, 0f0, 0f0)
+            if in_seq_bounds || elem_id ≤ emb
+                δ, w_i, x_i = Float32(Δ[elem_id, i]), Float32(w[elem_id]), Float32(x[elem_id, i])
 
-            # Compute `dx`.
-            m = δ * (w_i + offset)
-            dx_i = rstd * m + rstd * (-inv_emb_size * rstd^2 * dd * x_i)
-            # Compute `dw = sum(dy * (x / RMS))`, sum over `batches_per_groupsize`.
-            dw_i = δ * (x_i * rstd)
+                # Compute `dx`.
+                m = δ * (w_i + offset)
+                dx_i = rstd * m + rstd * (-inv_emb_size * rstd^2 * dd * x_i)
+                # Compute `dw = sum(dy * (x / RMS))`, sum over `batches_per_groupsize`.
+                dw_i = δ * (x_i * rstd)
 
-            dw_sh[elem_id] += dw_i
-            @synchronize()
-            if in_seq_bounds || elem_id ≤ size(x, 1)
                 dx[elem_id, i] = dx_i
+                dw_sh[elem_id] += dw_i
             end
+            @synchronize()
             elem_id += gsz
         end
     end
 
     elem_id = idx
     @unroll for _ in 1:n_loop_iters
-        dw_i = dw_sh[elem_id]
-        if in_seq_bounds || elem_id ≤ size(x, 1)
-            dw[bid, elem_id] = dw_i
+        if in_seq_bounds || elem_id ≤ emb
+            dw[bid, elem_id] = dw_sh[elem_id]
         end
         elem_id += gsz
     end
@@ -156,7 +151,7 @@ function ∇rms_norm(Δ, rms, x, w; offset::Float32)
 
     in_seq_bounds = size(x, 1) % gsz == 0
     n_loop_iters = ceil(Int, emb / gsz)
-    emb_sh_size = cld(emb, gsz) * gsz
+    emb_sh_size = emb
 
     _∇rms_norm!(kab, gsz)(
         dx, dw,

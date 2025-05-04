@@ -62,27 +62,29 @@ C12_reduce(a::C12, b::C12)::C12 = C12(a.c1 + b.c1, a.c2 + b.c2)
     end
 end
 
-@kernel cpu=false function _∇layer_norm!(
+@kernel cpu=false unsafe_indices=true inbounds=true function _∇layer_norm!(
     dx, dw, db,
     Δ, μ, Σ,
     x, w, b,
     inv_emb_size::Float32, batches_per_groupsize::Int,
-    ::Val{emb_sh_size}, ::Val{in_seq_bounds}, ::Val{n_loop_iters},
-) where {emb_sh_size, in_seq_bounds, n_loop_iters}
+    ::Val{emb}, ::Val{in_seq_bounds}, ::Val{n_loop_iters},
+) where {emb, in_seq_bounds, n_loop_iters}
     n = size(x, 2)
 
     gsz = @groupsize()[1]
     idx = @index(Local)
     bid = @index(Group)
 
-    dw_sh = @localmem Float32 emb_sh_size
-    db_sh = @localmem Float32 emb_sh_size
+    dw_sh = @localmem Float32 emb
+    db_sh = @localmem Float32 emb
     c_sh = @localmem C12 1
 
     elem_id = idx
     @unroll for _ in 1:n_loop_iters
-        dw_sh[elem_id] = 0f0
-        db_sh[elem_id] = 0f0
+        if in_seq_bounds || elem_id ≤ emb
+            dw_sh[elem_id] = 0f0
+            db_sh[elem_id] = 0f0
+        end
         elem_id += gsz
     end
     @synchronize()
@@ -92,19 +94,17 @@ end
     for i in ns:ne
         μi, σ = μ[i], Σ[i]
 
-        # Compute `xn ⋅ wdy` & `sum(wdy)`.
+        # Compute `c1 = wdy ⋅ xn` & `c2 = sum(wdy)`.
         elem_id = idx
         c1::Float32, c2::Float32 = 0f0, 0f0
         @unroll for _ in 1:n_loop_iters
-            in_seq = in_seq_bounds || elem_id ≤ size(x, 1)
-
-            xi, wi, δ = in_seq ?
-                (Float32(x[elem_id, i]), Float32(w[elem_id]), Float32(Δ[elem_id, i])) :
-                (0f0, 0f0, 0f0)
-            xn = in_seq ? (xi - μi) * σ : 0f0
-            wdy = in_seq ? wi * δ : 0f0
-            c1 += wdy * xn
-            c2 += wdy
+            if in_seq_bounds || elem_id ≤ emb
+                xi, wi, δ = Float32(x[elem_id, i]), Float32(w[elem_id]), Float32(Δ[elem_id, i])
+                xn = (xi - μi) * σ
+                wdy = wi * δ
+                c1 += wdy * xn
+                c2 += wdy
+            end
             elem_id += gsz
         end
         c1 *= inv_emb_size
@@ -118,35 +118,30 @@ end
         c12 = c_sh[1]
         c1, c2 = c12.c1, c12.c2
 
-        # Compute `dx`.
+        # Compute `dx, dw, db`.
         elem_id = idx
         @unroll for _ in 1:n_loop_iters
-            in_seq = in_seq_bounds || elem_id ≤ size(x, 1)
+            if in_seq_bounds || elem_id ≤ emb
+                xi, wi, δ = Float32(x[elem_id, i]), Float32(w[elem_id]), Float32(Δ[elem_id, i])
+                xn = (xi - μi) * σ
+                wdy = wi * δ
+                dxi = (wdy - (xn * c1 + c2)) * σ
+                dwi = δ * xn
 
-            xi, wi, δ = in_seq ?
-                (Float32(x[elem_id, i]), Float32(w[elem_id]), Float32(Δ[elem_id, i])) :
-                (0f0, 0f0, 0f0)
-            xn = in_seq ? (xi - μi) * σ : 0f0
-            wdy = in_seq ? wi * δ : 0f0
-
-            dxi = (wdy - (xn * c1 + c2)) * σ
-            dwi = δ * xn
-
-            dw_sh[elem_id] += dwi
-            db_sh[elem_id] += δ
+                dx[elem_id, i] = dxi
+                dw_sh[elem_id] += dwi
+                db_sh[elem_id] += δ
+            end
             @synchronize()
-            in_seq && (dx[elem_id, i] = dxi)
             elem_id += gsz
         end
     end
 
     elem_id = idx
     @unroll for _ in 1:n_loop_iters
-        dwi = dw_sh[elem_id]
-        dbi = db_sh[elem_id]
-        if in_seq_bounds || elem_id ≤ size(x, 1)
-            dw[bid, elem_id] = dwi
-            db[bid, elem_id] = dbi
+        if in_seq_bounds || elem_id ≤ emb
+            dw[bid, elem_id] = dw_sh[elem_id]
+            db[bid, elem_id] = db_sh[elem_id]
         end
         elem_id += gsz
     end
@@ -174,7 +169,7 @@ function _layer_norm(x, w, b; ϵ::Float32 = 1f-6)
     return y, μ, Σ
 end
 
-function ∇layer_norm(Δ, μ, Σ, x, w, b; ϵ::Float32)
+function ∇layer_norm(Δ, μ, Σ, x, w, b)
     emb, n = size(x)
     batches_per_groupsize = 4 # TODO == sm_count, query
     n_batch_loop_iters = ceil(Int, n / batches_per_groupsize)
@@ -190,10 +185,7 @@ function ∇layer_norm(Δ, μ, Σ, x, w, b; ϵ::Float32)
 
     in_seq_bounds = size(x, 1) % gsz == 0
     n_loop_iters = ceil(Int, emb / gsz)
-    emb_sh_size = cld(emb, gsz) * gsz
-    @show n_loop_iters
-    @show emb_sh_size
-    @show in_seq_bounds
+    emb_sh_size = emb
 
     _∇layer_norm!(kab, gsz)(
         dx, dw, db,
@@ -209,4 +201,20 @@ function ∇layer_norm(Δ, μ, Σ, x, w, b; ϵ::Float32)
         reshape(sum(dw; dims=1), :), reshape(sum(db; dims=1), :)
     end
     return dx, dw, db
+end
+
+function layer_norm(x, w, b; ϵ::Float32 = 1f-6)
+    y = _layer_norm(x, w, b; ϵ)
+    within_gradient(x) && return y
+    @assert length(y) == 3
+    return y[1]
+end
+
+function ChainRulesCore.rrule(::typeof(_layer_norm), x, w, b; ϵ::Float32 = 1f-6)
+    y, μ, Σ = _layer_norm(x, w, b; ϵ)
+    function _pullback(Δ)
+        dx, dw, db = ∇layer_norm(ChainRulesCore.unthunk(Δ), μ, Σ, x, w, b)
+        return ChainRulesCore.NoTangent(), dx, dw, db
+    end
+    return y, _pullback
 end
