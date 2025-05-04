@@ -10,12 +10,16 @@
 [buildkite-img-cuda]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?branch=master&step=CUDA%20-%20Julia%201.11
 [buildkite-url]: https://buildkite.com/julialang/nnop-dot-jl
 
-Pure Julia NN kernels:
+Kernels (with [ChainRules.jl](https://github.com/JuliaDiff/ChainRules.jl) integration):
 
 - [Flash Attention](#flash-attention)
 - [Fused Softmax](#fused-softmax)
 - [Fused RMS Norm](#fused-rms-norm)
 - [Fused Layer Norm](#fused-layer-norm)
+
+## Benchmarking
+
+See `benchmarks/main.jl` for comparison scripts between naїve & fused versions.
 
 ## Flash Attention
 
@@ -35,10 +39,6 @@ o = NNop.flash_attention(q, k, v; causal)
 end
 ```
 
-### Benchmarks:
-
-For the problem size `(E=64, L=4096, H=4, B=4)`.
-
 ||Naїve attention|Flash Attention|
 |-|-|-|
 |FWD|||
@@ -55,7 +55,6 @@ For the problem size `(E=64, L=4096, H=4, B=4)`.
 - FP32, FP16, BFP16 support.
 - Variable sequence length.
 - Causal masking.
-- Zygote / ChainRules integration.
 
 ## Fused Softmax
 
