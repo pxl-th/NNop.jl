@@ -10,10 +10,12 @@
 [buildkite-img-cuda]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?branch=master&step=CUDA%20-%20Julia%201.11
 [buildkite-url]: https://buildkite.com/julialang/nnop-dot-jl
 
-Pure Julia NN kernels.
+Pure Julia NN kernels:
 
-> [!WARNING]
-> The package is in the early stages and is not yet fully ready.
+- [Flash Attention](#flash-attention)
+- [Fused Softmax](#fused-softmax)
+- [Fused RMS Norm](#fused-rms-norm)
+- [Fused Layer Norm](#fused-layer-norm)
 
 ## Flash Attention
 
@@ -55,7 +57,7 @@ For the problem size `(E=64, L=4096, H=4, B=4)`.
 - Causal masking.
 - Zygote / ChainRules integration.
 
-## Fused (online) Softmax
+## Fused Softmax
 
 Implementation of [Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867).
 
@@ -88,3 +90,25 @@ end
 |FWD + BWD|||
 |Execution time|902.919 μs|241.838 μs|
 |Peak memory usage|44.043 MiB|13.008 MiB|
+
+
+## Fused Layer Norm
+
+```julia
+x = ROCArray(rand(Float32, 1024, 1024))
+w = ROCArray(rand(Float32, 1024))
+w = ROCArray(rand(Float32, 1024))
+y = NNop.layer_norm(x, w)
+∇ = Zygote.gradient(x, w, b) do x, w, b
+    sum(NNop.layer_norm(x, w, b))
+end
+```
+
+||Naїve Layer Norm|Fused Layer Norm|
+|-|-|-|
+|FWD|||
+|Execution time|188.392 μs|48.175 μs|
+|Peak memory usage|4.008 MiB|4.004 MiB|
+|FWD + BWD|||
+|Execution time|1.150 ms|293.969 μs|
+|Peak memory usage|52.055 MiB|14.016 MiB|
