@@ -30,6 +30,74 @@ function naive_rms_norm(x, w; offset::Float32 = 0f0, ϵ::Float32 = 1f-6)
     (w .+ offset) .* x ./ sqrt.(mean(x.^2; dims=1) .+ ϵ)
 end
 
+function naive_layer_norm(x, w, b; ϵ::Float32 = 1f-6)
+    μ = mean(x; dims=1)
+    σ² = var(x; mean=μ, dims=1, corrected=false)
+    (x .- μ) ./ sqrt.(σ² .+ ϵ) .* w .+ b
+end
+
+function test_layer_norm(kab)
+    emb, n = 1024, 1024
+    x = Adapt.adapt(kab, rand(Float32, emb, n))
+    w = Adapt.adapt(kab, rand(Float32, emb))
+    b = Adapt.adapt(kab, rand(Float32, emb))
+
+    y1 = naive_layer_norm(x, w, b)
+    y2 = NNop.layer_norm(x, w, b)
+    @assert isapprox(y1, y2; atol=1f-6, rtol=1f-6)
+
+    ∇n = Zygote.gradient(x, w, b) do x, w, b
+        sum(naive_layer_norm(x, w, b))
+    end
+    ∇f = Zygote.gradient(x, w, b) do x, w, b
+        sum(NNop.layer_norm(x, w, b))
+    end
+
+    @assert isapprox(∇n[1], ∇f[1]; atol=1f-6, rtol=1f-6)
+    @assert isapprox(∇n[2], ∇f[2]; atol=1f-6, rtol=1f-6)
+    @assert isapprox(∇n[3], ∇f[3]; atol=1f-6, rtol=1f-6)
+
+    cache = GPUArrays.AllocCache()
+
+    println("Naїve LayerNorm:")
+    @btime GPUArrays.@cached $cache begin
+        naive_layer_norm($x, $w, $b)
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Fused LayerNorm:")
+    @btime GPUArrays.@cached $cache begin
+        NNop.layer_norm($x, $w, $b)
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Naїve LayerNorm fwd + bwd:")
+    @btime GPUArrays.@cached $cache begin
+        Zygote.gradient($x, $w, $b) do x, w, b
+            sum(naive_layer_norm(x, w, b))
+        end
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Fused LayerNorm fwd + bwd:")
+    @btime GPUArrays.@cached $cache begin
+        Zygote.gradient($x, $w, $b) do x, w, b
+            sum(NNop.layer_norm(x, w, b))
+        end
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    return
+end
+
 function test_rms_norm(kab)
     emb, n = 1024, 1024
     x = Adapt.adapt(kab, rand(Float32, emb, n))
