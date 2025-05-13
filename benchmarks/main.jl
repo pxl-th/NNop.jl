@@ -36,6 +36,21 @@ function naive_layer_norm(x, w, b; ϵ::Float32 = 1f-6)
     (x .- μ) ./ sqrt.(σ² .+ ϵ) .* w .+ b
 end
 
+function rotate_half(x)
+    half_dim = size(x, 1) ÷ 2
+    x1 = x[1:half_dim, :, :, :]
+    x2 = x[(half_dim + 1):end, :, :, :]
+    return vcat(-x2, x1)
+end
+
+function naive_llama_rope(q, k, cos, sin)
+    cos = reshape(cos, size(cos)[1:2]..., 1, size(cos, 3))
+    sin = reshape(sin, size(sin)[1:2]..., 1, size(sin, 3))
+    q = q .* cos .+ rotate_half(q) .* sin
+    k = k .* cos .+ rotate_half(k) .* sin
+    return q, k
+end
+
 function test_layer_norm(kab)
     emb, n = 1024, 1024
     x = Adapt.adapt(kab, rand(Float32, emb, n))
@@ -94,7 +109,6 @@ function test_layer_norm(kab)
     end
     println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
     GPUArrays.unsafe_free!(cache)
-
     return
 end
 
@@ -153,6 +167,26 @@ function test_rms_norm(kab)
     end
     println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
     GPUArrays.unsafe_free!(cache)
+    return
+end
+
+function test_llama_rope(kab)
+    dim, n_heads, seq_len, batch = 16, 16, 32, 1
+    emb = NNop.LlamaRotaryEmbedding(dim)
+
+    position_ids = reshape(collect(0f0:Float32(seq_len) - 1f0), :, 1)
+    # TODO repeat
+
+    cf, sf = emb(position_ids)
+    cf = Adapt.adapt(kab, cf)
+    sf = Adapt.adapt(kab, sf)
+    q = Adapt.adapt(kab, ones(Float32, (dim, seq_len, n_heads, batch)))
+    k = Adapt.adapt(kab, ones(Float32, (dim, seq_len, n_heads, batch)))
+
+    q1, k1 = NNop.llama_rope(q, k, cf, sf)
+    q2, k2 = naive_llama_rope(q, k, cf, sf)
+    @assert isapprox(q1, q2; rtol=1f-6, atol=1f-6)
+    @assert isapprox(k1, k2; rtol=1f-6, atol=1f-6)
     return
 end
 
