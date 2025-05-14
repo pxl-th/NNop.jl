@@ -7,7 +7,7 @@ using Random
 using GPUArrays
 
 import Adapt
-import KernelAbstractions as KA
+import NNop.KernelAbstractions as KA
 
 function naive_softmax(x; dims = 1)
     mx = maximum(x; dims)
@@ -43,7 +43,7 @@ function rotate_half(x)
     return vcat(-x2, x1)
 end
 
-function naive_llama_rope(q, k, cos, sin)
+function naive_llama_rope(q, k; cos, sin)
     cos = reshape(cos, size(cos)[1:2]..., 1, size(cos, 3))
     sin = reshape(sin, size(sin)[1:2]..., 1, size(sin, 3))
     q = q .* cos .+ rotate_half(q) .* sin
@@ -171,22 +171,76 @@ function test_rms_norm(kab)
 end
 
 function test_llama_rope(kab)
-    dim, n_heads, seq_len, batch = 16, 16, 32, 1
+    dim, n_heads, seq_len, batch = 64, 32, 1024, 4
     emb = NNop.LlamaRotaryEmbedding(dim)
 
     position_ids = reshape(collect(0f0:Float32(seq_len) - 1f0), :, 1)
-    # TODO repeat
+    position_ids = repeat(position_ids; inner=(1, batch))
 
-    cf, sf = emb(position_ids)
-    cf = Adapt.adapt(kab, cf)
-    sf = Adapt.adapt(kab, sf)
+    cos, sin = emb(position_ids)
+    cos = Adapt.adapt(kab, cos)
+    sin = Adapt.adapt(kab, sin)
     q = Adapt.adapt(kab, ones(Float32, (dim, seq_len, n_heads, batch)))
     k = Adapt.adapt(kab, ones(Float32, (dim, seq_len, n_heads, batch)))
 
-    q1, k1 = NNop.llama_rope(q, k, cf, sf)
-    q2, k2 = naive_llama_rope(q, k, cf, sf)
-    @assert isapprox(q1, q2; rtol=1f-6, atol=1f-6)
-    @assert isapprox(k1, k2; rtol=1f-6, atol=1f-6)
+    q1, k1 = NNop.llama_rope(q, k; cos, sin)
+    q2, k2 = naive_llama_rope(q, k; cos, sin)
+    @assert q1 ≈ q2
+    @assert k1 ≈ k2
+
+    ∇1 = Zygote.gradient(q, k) do q, k
+        qr, kr = NNop.llama_rope(q, k; cos, sin)
+        sum(qr) + sum(kr)
+    end
+    ∇2 = Zygote.gradient(q, k) do q, k
+        qr, kr = naive_llama_rope(q, k; cos, sin)
+        sum(qr) + sum(kr)
+    end
+    @assert ∇1[1] ≈ ∇2[1]
+    @assert ∇1[2] ≈ ∇2[2]
+
+    GC.gc(false)
+    GC.gc(true)
+
+    cache = GPUArrays.AllocCache()
+
+    println("Naїve Llama RoPE FWD:")
+    @btime GPUArrays.@cached $cache begin
+        naive_llama_rope($q, $k; cos=$cos, sin=$sin)
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Fused Llama RoPe FWD:")
+    @btime GPUArrays.@cached $cache begin
+        NNop.llama_rope($q, $k; cos=$cos, sin=$sin)
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Naїve Llama RoPE:")
+    @btime GPUArrays.@cached $cache begin
+        ∇ = Zygote.gradient($q, $k) do q, k
+            qr, kr = naive_llama_rope(q, k; cos=$cos, sin=$sin)
+            sum(qr) + sum(kr)
+        end
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
+
+    println("Fused Llama RoPE FWD + BWD:")
+    @btime GPUArrays.@cached $cache begin
+        Zygote.gradient($q, $k) do q, k
+            qr, kr = NNop.llama_rope(q, k; cos=$cos, sin=$sin)
+            sum(qr) + sum(kr)
+        end
+        KA.synchronize($kab)
+    end
+    println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+    GPUArrays.unsafe_free!(cache)
     return
 end
 
