@@ -21,66 +21,82 @@ function (emb::LlamaRotaryEmbedding)(position_ids::AbstractMatrix{Float32})
     return cos.(freqs), sin.(freqs)
 end
 
-@kernel cpu=false inbounds=true unsafe_indices=true function llama_rope!(
-    q, k, cos, sin, ::Val{q_half_dim}, ::Val{k_half_dim}, ::Val{bwd},
-) where {q_half_dim, k_half_dim, bwd}
+@kernel cpu=false unsafe_indices=true inbounds=true function llama_rope!(
+    q, k, cos, sin,
+    ::Val{n_seq_tiles}, ::Val{q_half_dim}, ::Val{k_half_dim}, ::Val{bwd},
+) where {n_seq_tiles, q_half_dim, k_half_dim, bwd}
+    gsz = @groupsize()[1]
     idx = @index(Local)
-    gid = @index(Group)
-
-    # TODO loop over seq & batch
-    # each thread loops over dim & heads
+    gid = @index(Group, NTuple)
 
     sin_sign = ifelse(bwd, -1f0, 1f0)
     q_dim = size(q, 1)
     k_dim = size(k, 1)
 
-    @unroll for i in 1:q_half_dim
-        other_i = (i - 1 + q_half_dim) % q_dim + 1
-        x1 = q[i, idx, gid]
-        x2 = q[other_i, idx, gid]
+    offset = 0
+    for _ in 1:n_seq_tiles
+        seq_idx = idx + offset
 
-        q[i, idx, gid]       = x1 * cos[i, gid] - x2 * sin[i, gid] * sin_sign
-        q[other_i, idx, gid] = x1 * cos[i, gid] + x1 * sin[i, gid] * sin_sign
-    end
-    @unroll for i in 1:k_half_dim
-        other_i = (i - 1 + k_half_dim) % k_dim + 1
-        x1 = k[i, idx, gid]
-        x2 = k[other_i, idx, gid]
+        @unroll for i in 1:q_half_dim
+            other_i = (i - 1 + q_half_dim) % q_dim + 1
 
-        k[i, idx, gid]       = x1 * cos[i, gid] - x2 * sin[i, gid] * sin_sign
-        k[other_i, idx, gid] = x1 * cos[i, gid] + x1 * sin[i, gid] * sin_sign
+            x1 = q[i, seq_idx, gid[1], gid[2]]
+            x2 = q[other_i, seq_idx, gid[1], gid[2]]
+
+            c = cos[i, seq_idx, gid[2]]
+            s = sin[i, seq_idx, gid[2]] * sin_sign
+
+            q[i, seq_idx, gid[1], gid[2]]       = x1 * c - x2 * s
+            q[other_i, seq_idx, gid[1], gid[2]] = x1 * c + x1 * s
+        end
+        @unroll for i in 1:k_half_dim
+            other_i = (i - 1 + k_half_dim) % k_dim + 1
+
+            x1 = k[i, seq_idx, gid[1], gid[2]]
+            x2 = k[other_i, seq_idx, gid[1], gid[2]]
+
+            c = cos[i, seq_idx, gid[2]]
+            s = sin[i, seq_idx, gid[2]] * sin_sign
+
+            k[i, seq_idx, gid[1], gid[2]]       = x1 * c - x2 * s
+            k[other_i, seq_idx, gid[1], gid[2]] = x1 * c + x1 * s
+        end
+        offset += gsz
     end
 end
 
+# q, k: [head dim, seq, n heads, batch]
+# cos, sin: [dim, seq, batch]
 function _llama_rope(q, k, cos, sin; bwd::Bool)
     @assert size(cos) == size(sin)
     kab = get_backend(q)
 
-    # [head dim, seq, n heads, batch] -> [head dim, n heads, seq, batch]
-    q = permutedims(q, (1, 3, 2, 4))
-    k = permutedims(k, (1, 3, 2, 4))
+    q = copy(q)
+    k = copy(k)
 
     q_half_dim = size(q, 1) ÷ 2
     k_half_dim = size(k, 1) ÷ 2
+    q_seq = size(q, 2)
+    k_seq = size(k, 2)
+    @assert q_seq == k_seq
 
-    q_heads, k_heads = size(q, 2), size(k, 2)
-    q_heads, k_heads = nextpow(2, q_heads), nextpow(2, k_heads)
-    gsz = max(q_heads, k_heads)
-    ndrange = gsz * prod(size(q)[3:4])
+    gsz = 256
+    q_seq_tiles = cld(q_seq, gsz)
+    k_seq_tiles = cld(k_seq, gsz)
+    ndrange = (gsz * size(q, 3), size(q, 4))
 
     llama_rope!(kab, gsz)(
-        reshape(q, size(q)[1:2]..., :),
-        reshape(k, size(k)[1:2]..., :),
-        reshape(cos, size(cos, 1), :),
-        reshape(sin, size(sin, 1), :),
+        q, k, cos, sin,
+        Val(q_seq_tiles), # TODO kkkkk
         Val(q_half_dim),
         Val(k_half_dim),
         Val(bwd); ndrange)
 
-    q = permutedims(q, (1, 3, 2, 4))
-    k = permutedims(k, (1, 3, 2, 4))
     return q, k
 end
+
+# TODO
+# - arbitrary q & k seq lengths
 
 llama_rope(q, k; cos, sin) = _llama_rope(q, k, cos, sin; bwd=false)
 ∇llama_rope(dq, dk; cos, sin) = _llama_rope(dq, dk, cos, sin; bwd=true)

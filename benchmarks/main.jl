@@ -171,7 +171,7 @@ function test_rms_norm(kab)
 end
 
 function test_llama_rope(kab)
-    dim, n_heads, seq_len, batch = 64, 32, 1024, 4
+    dim, n_heads, seq_len, batch = 64, 32, 1024, 8
     emb = NNop.LlamaRotaryEmbedding(dim)
 
     position_ids = reshape(collect(0f0:Float32(seq_len) - 1f0), :, 1)
