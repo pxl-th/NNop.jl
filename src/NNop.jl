@@ -20,6 +20,8 @@ include("attention_crc.jl")
 include("rms_norm.jl")
 include("layer_norm.jl")
 
+include("rope/llama_rope.jl")
+
 @memoize LRU{Tuple{Any, Integer}, UInt64}(maxsize=32) shared_memory(kab, device_id::Integer) =
     _shared_memory(kab, device_id)
 
