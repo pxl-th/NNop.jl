@@ -171,7 +171,7 @@ function test_rms_norm(kab)
 end
 
 function test_llama_rope(kab)
-    dim, n_heads, seq_len, batch = 64, 32, 1024, 8
+    dim, n_heads, seq_len, batch = 64, 3, 1024, 4
     emb = NNop.LlamaRotaryEmbedding(dim)
 
     position_ids = reshape(collect(0f0:Float32(seq_len) - 1f0), :, 1)
@@ -180,8 +180,8 @@ function test_llama_rope(kab)
     cos, sin = emb(position_ids)
     cos = Adapt.adapt(kab, cos)
     sin = Adapt.adapt(kab, sin)
-    q = Adapt.adapt(kab, ones(Float32, (dim, seq_len, n_heads, batch)))
-    k = Adapt.adapt(kab, ones(Float32, (dim, seq_len, n_heads, batch)))
+    q = Adapt.adapt(kab, rand(Float32, (dim, seq_len, n_heads, batch)))
+    k = Adapt.adapt(kab, rand(Float32, (dim, seq_len, n_heads, batch)))
 
     q1, k1 = NNop.llama_rope(q, k; cos, sin)
     q2, k2 = naive_llama_rope(q, k; cos, sin)

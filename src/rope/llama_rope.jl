@@ -29,27 +29,36 @@ end
     idx = @index(Local)
     gid = @index(Group, NTuple)
 
-    q_dim, q_seq = size(q, 1), size(q, 2)
-    k_dim, k_seq = size(k, 1), size(k, 2)
+    hi, bi = gid
+
+    q_seq = size(q, 2)
+    q_heads = size(q, 3)
+    k_heads = size(k, 3)
 
     offset = 0
-    for _ in 1:n_seq_tiles
+    @unroll for _ in 1:n_seq_tiles
         seq_idx = idx + offset
+        seq_idx ≤ q_seq || continue
 
         @unroll for i in 1:half_dim
-            other_i = (i - 1 + half_dim) % q_dim + 1
+            other_i = i + half_dim
+            c = cos[i, seq_idx, bi]
+            s = sin[i, seq_idx, bi] * sin_sign
 
-            x1 = q[i, seq_idx, gid[1], gid[2]]
-            x2 = q[other_i, seq_idx, gid[1], gid[2]]
+            if hi ≤ q_heads
+                x1 = q[i, seq_idx, hi, bi]
+                x2 = q[other_i, seq_idx, hi, bi]
 
-            c = cos[i, seq_idx, gid[2]]
-            s = sin[i, seq_idx, gid[2]] * sin_sign
+                q[i, seq_idx, hi, bi]       = x1 * c - x2 * s
+                q[other_i, seq_idx, hi, bi] = x2 * c + x1 * s
+            end
+            if hi ≤ k_heads
+                x1 = k[i, seq_idx, hi, bi]
+                x2 = k[other_i, seq_idx, hi, bi]
 
-            q[i, seq_idx, gid[1], gid[2]]       = x1 * c - x2 * s
-            q[other_i, seq_idx, gid[1], gid[2]] = x1 * c + x1 * s
-
-            k[i, seq_idx, gid[1], gid[2]]       = x1 * c - x2 * s
-            k[other_i, seq_idx, gid[1], gid[2]] = x1 * c + x1 * s
+                k[i, seq_idx, hi, bi]       = x1 * c - x2 * s
+                k[other_i, seq_idx, hi, bi] = x2 * c + x1 * s
+            end
         end
         offset += gsz
     end
@@ -58,31 +67,26 @@ end
 # q, k: [head dim, seq, n heads, batch]
 # cos, sin: [dim, seq, batch]
 function _llama_rope(q, k, cos, sin; bwd::Bool)
-    @assert size(cos) == size(sin)
-    kab = get_backend(q)
+    @assert size(q, 1) == size(k, 1)
+    @assert size(q, 2) == size(k, 2)
+    @assert size(q, 4) == size(k, 4)
 
+    kab = get_backend(q)
     q = copy(q)
     k = copy(k)
 
-    @assert size(q, 1) == size(k, 1)
     half_dim = size(q, 1) ÷ 2
-    q_seq = size(q, 2)
-    k_seq = size(k, 2)
-    @assert q_seq == k_seq
+    q_heads, k_heads = size(q, 3), size(k, 3)
 
     gsz = 256
-    ndrange = (gsz * size(q, 3), size(q, 4))
-    n_seq_tiles = max(cld(q_seq, gsz), cld(k_seq, gsz))
+    ndrange = (gsz * max(q_heads, k_heads), size(q, 4))
+    n_seq_tiles = cld(size(q, 2), gsz)
 
     llama_rope!(kab, gsz)(
         q, k, cos, sin, bwd ? -1f0 : 1f0,
         Val(n_seq_tiles), Val(half_dim); ndrange)
-
     return q, k
 end
-
-# TODO
-# - arbitrary q & k n heads?
 
 llama_rope(q, k; cos, sin) = _llama_rope(q, k, cos, sin; bwd=false)
 ∇llama_rope(dq, dk; cos, sin) = _llama_rope(dq, dk, cos, sin; bwd=true)
