@@ -47,7 +47,7 @@ function naive_layer_norm(x, w, b; ϵ::Float32 = 1f-6)
     μ = mean(x; dims=1)
     σ² = var(x; mean=μ, dims=1, corrected=false)
     (x .- μ) ./ sqrt.(σ² .+ ϵ) .* w .+ b
-emd
+end
 
 function rotate_half(x)
     half_dim = size(x, 1) ÷ 2
