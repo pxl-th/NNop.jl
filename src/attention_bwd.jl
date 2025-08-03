@@ -1,17 +1,15 @@
 @kernel unsafe_indices=true cpu=false inbounds=true function _flash_attention_bwd!(
     cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
-    # ─────────── outputs ───────────
     dq::AbstractArray{T,4}, dk::AbstractArray{T,4}, dv::AbstractArray{T,4},
-    # ─────────── inputs ────────────
-    Δ::AbstractArray{T,4},
+    Δ::AbstractArray{T,4}, 
     δ::AbstractArray{T,3},
     o::AbstractArray{T,4},
     ms::AbstractArray{T,3},
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
     scale::T,
-    kpad_mask,                                    # NEW  (Bool(KL,B) or nothing)
+    kpad_mask,
     ::Val{emb_dim}, ::Val{q_seq_tiles}, ::Val{kv_seq_tiles},
-    ::Val{in_seq_bounds}, ::Val{causal}, ::Val{use_padmask},   # NEW flag
+    ::Val{in_seq_bounds}, ::Val{causal}, ::Val{use_padmask},
 ) where {T, emb_dim, q_seq_tiles, kv_seq_tiles, in_seq_bounds, causal, use_padmask}
     gsz = @groupsize()[1]
 
@@ -180,44 +178,63 @@ function ∇flash_attention(
     gsz          = flash_attention_groupsize(T; emb_dim, target_shmem)
 
     q_seq_tiles, kv_seq_tiles = cld.( (QL, KL), gsz )
-    threads   = (gsz, 1)
-    ndrange   = (gsz * H, B)
     in_bounds = QL % gsz == 0 && KL % gsz == 0
     use_mask  = kpad_mask !== nothing
     scale     = T(inv(sqrt(emb_dim)))
+
+    # ---------------- preprocess (unchanged logic) ------------------------
+    Δ_scaled = similar(Δ)
+    δ        = similar(ls)
+
+    threads = (gsz, 1, 1)
+    ndrange = (gsz * q_seq_tiles, H, B)
+    _flash_attention_bwd_preprocess!(kab, threads)(
+        Δ_scaled, δ,   # outputs
+        Δ, o, ls,      # inputs
+        Val(emb_dim), Val(in_bounds); ndrange)
+    # ----------------------------------------------------------------------
 
     dq = KA.zeros(kab, T, size(q))
     dk = KA.zeros(kab, T, size(k))
     dv = KA.zeros(kab, T, size(v))
 
-    # --- MMA configs (exactly the originals) ------------------------------
+    # mma config for Q' * K tile: (L_q, emb_dim) * (emb_dim, L_k).
     BM, BK, BN = gsz, emb_dim, gsz
-    TM, TN     = flash_attention_mma_thread_cfg(gsz; BM, BN)
-    cfg        = FATileConfig{BM,BK,BN,TM,TN,false,false,false}
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
+    cfg = FATileConfig{BM, BK, BN, TM, TN, false, false, false}
 
+    # mma config for dv = Δ * s_shm tile: (emb_dim, L_q) * s_shm(L_q, L_k).
     BM, BK, BN = emb_dim, gsz, gsz
-    TM, TN     = flash_attention_mma_thread_cfg(gsz; BM, BN)
-    cfg_dv     = FATileConfig{BM,BK,BN,TM,TN,false,false,false}
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
+    cfg_dv = FATileConfig{BM, BK, BN, TM, TN, false, false, false}
 
+    # mma config for dk
     BM, BK, BN = gsz, gsz, emb_dim
-    TM, TN     = flash_attention_mma_thread_cfg(gsz; BM, BN)
-    cfg_dk     = FATileConfig{BM,BK,BN,TM,TN,true,false,true}
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
+    cfg_dk = FATileConfig{BM, BK, BN, TM, TN, true, false, true}
 
-    cfg_dq     = cfg_dk  # same geometry
+    # mma config for dq
+    BM, BK, BN = gsz, gsz, emb_dim
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
+    cfg_dq = FATileConfig{BM, BK, BN, TM, TN, false, true, true}
+
+    # mma config for ds
     BM, BK, BN = gsz, emb_dim, gsz
-    TM, TN     = flash_attention_mma_thread_cfg(gsz; BM, BN)
-    cfg_ds     = FATileConfig{BM,BK,BN,TM,TN,true,false,false}
-    # ----------------------------------------------------------------------
+    TM, TN = flash_attention_mma_thread_cfg(gsz; BM, BN)
+    cfg_ds = FATileConfig{BM, BK, BN, TM, TN, true, false, false}
 
+    threads   = (gsz, 1)
+    ndrange   = (gsz * H, B)
     _flash_attention_bwd!(kab, threads)(
         cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
-        dq, dk, dv,                 # outputs
-        Δ,                          # Δ already scaled in kernel
-        ls, o, ms,
+        dq, dk, dv,                # outputs
+        Δ_scaled, δ,               # pre-processed grads  ← restored
+        o, ms,
         q, k, v, scale,
-        kpad_mask,                  # NEW
+        kpad_mask,
         Val(emb_dim), Val(q_seq_tiles), Val(kv_seq_tiles),
         Val(in_bounds), Val(causal), Val(use_mask); ndrange)
 
     return dq, dk, dv
 end
+
