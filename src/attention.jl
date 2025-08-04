@@ -59,6 +59,8 @@
         if use_pair
             @unroll for i in 1:gsz
                 (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
+                #(in_seq_bounds || q_offset + tidx ≤ size(q, 2)) || break
+                in_q_seq_bounds || break
                 s_shm[tidx, i] += @inbounds pair[q_offset + tidx,
                                                  k_offset + i,
                                                  gidx[2], gidx[3]]

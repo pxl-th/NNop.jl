@@ -61,6 +61,7 @@
             if use_pair
                 @unroll for j in 1:gsz
                     (in_seq_bounds || lo_k+j ≤ size(pair,2)) || break
+                    (in_seq_bounds || q_offset+tidx ≤ size(pair,1)) || break  # Add this line
                     s_shm[tidx,j] += @inbounds pair[q_offset+tidx,
                                                     lo_k+j,
                                                     gidx[1], gidx[2]]
@@ -122,8 +123,7 @@
                 for j in 1:gsz
                     col = j + lo_k
                     (in_seq_bounds || col ≤ size(dpair,2)) || break
-                    # Check bounds properly for both row and col
-                    if (in_seq_bounds || (row ≤ size(dpair,1) && col ≤ size(dpair,2))) #<-IDGI - this was a nightmare
+                    if (in_seq_bounds || row ≤ size(dpair,1))  # Simplified bounds check
                         @inbounds dpair[row, col, gidx[1], gidx[2]] = s_shm[tidx,j] / scale
                     end
                 end
