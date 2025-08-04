@@ -1,17 +1,20 @@
 @kernel unsafe_indices=true cpu=false inbounds=true function _flash_attention_fwd!(
     cfg, cfg_out,
-    # Output.
+    # outputs
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
-    # Input.
+    # inputs
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
+    pair::AbstractArray{T, 4},                               # NEW
     scale::T,
-    kpad_mask,                      # NEW  –  Bool(KL,B)  or  nothing
+    kpad_mask,
     ::Val{emb_dim}, ::Val{kv_seq_tiles}, ::Val{in_seq_bounds},
-    ::Val{causal},  ::Val{use_padmask},  # NEW  –  compile-time flag
-) where {T, emb_dim, kv_seq_tiles, in_seq_bounds, causal, use_padmask}
-    gsz = @groupsize()[1]
+    ::Val{causal},  ::Val{use_padmask}, ::Val{use_pair},     # NEW flag
+) where {T, emb_dim, kv_seq_tiles, in_seq_bounds,
+         causal, use_padmask, use_pair}
 
-    # `v` shares shmem with `k`.
+    gsz      = @groupsize()[1]
+
+    # shared-memory buffers ------------------------------------------------
     q_shm = @localmem T (gsz, emb_dim)
     k_shm = @localmem T (emb_dim, gsz)
     s_shm = @localmem T (gsz, gsz)
@@ -22,14 +25,15 @@
     q_offset = (gidx[1] - 1) * gsz
     in_q_seq_bounds = in_seq_bounds || q_offset + tidx ≤ size(q, 2)
 
-    @inline function sh_load_emb!(dest, source, offset, mask::Bool, ::Val{transposed}) where transposed
+    @inline function sh_load_emb!(dest, src, offset, mask::Bool,
+                                  ::Val{tr}) where tr
         @unroll for i in 1:emb_dim
-            x, y = transposed ? (tidx, i) : (i, tidx)
-            @inbounds dest[x, y] = mask ? source[i, tidx + offset, gidx[2], gidx[3]] : zero(T)
+            x, y = tr ? (tidx, i) : (i, tidx)
+            @inbounds dest[x, y] = mask ? src[i, tidx + offset, gidx[2], gidx[3]] : zero(T)
         end
     end
 
-    # Load transposed `q` and initialise.
+    # Load `q` --------------------------------------------------------------
     sh_load_emb!(q_shm, q, q_offset, in_q_seq_bounds, Val{true}())
     @unroll for i in 1:emb_dim
         o_shm[i, tidx] = zero(T)
@@ -39,26 +43,36 @@
     l_i = zero(T)
     m_i = typemin(T)
     k_offset = 0
-
     end_iter = causal ? gidx[1] : kv_seq_tiles
+
     for _ in 1:end_iter
         in_k_seq_bounds = in_seq_bounds || k_offset + tidx ≤ size(k, 2)
         sh_load_emb!(k_shm, k, k_offset, in_k_seq_bounds, Val{false}())
         @synchronize()
 
-        # --- QK ---
-        mma!(s_shm, q_shm, k_shm, cfg, tidx, (res, c_shm, x, y) -> res * scale)
+        # ---- scaled Q · Kᵀ ------------------------------------------------
+        mma!(s_shm, q_shm, k_shm, cfg, tidx,
+             (res, c_shm, x, y) -> res * scale)
         @synchronize()
 
-        # causal mask
+        # ---- add pair features -------------------------------------------
+        if use_pair
+            @unroll for i in 1:gsz
+                (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
+                s_shm[tidx, i] += @inbounds pair[q_offset + tidx,
+                                                 k_offset + i,
+                                                 gidx[2], gidx[3]]
+            end
+        end
+
+        # ---- causal / pad masking ----------------------------------------
         if causal
             for i in 1:gsz
                 (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
-                s_shm[tidx, i] = ifelse(tidx + q_offset ≥ i + k_offset,
-                                         s_shm[tidx, i], typemin(T))
+                s_shm[tidx, i] = (tidx + q_offset ≥ i + k_offset) ?
+                                  s_shm[tidx, i] : typemin(T)
             end
         end
-        # key-padding mask  (compile-time eliminated when use_padmask == false)
         if use_padmask
             for i in 1:gsz
                 (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
@@ -67,7 +81,7 @@
             end
         end
 
-        # --- soft-max (row-online) ---
+        # ---- online soft-max ---------------------------------------------
         m_ij = typemin(T)
         @unroll for i in 1:gsz
             m_ij = max(m_ij, s_shm[tidx, i])
@@ -76,8 +90,8 @@
         l_ij = zero(T)
         @unroll for i in 1:gsz
             (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
-            tmp = exp(s_shm[tidx, i] - m_ij)
-            l_ij += tmp
+            tmp        = exp(s_shm[tidx, i] - m_ij)
+            l_ij      += tmp
             s_shm[tidx, i] = tmp
         end
         @synchronize()
@@ -97,7 +111,7 @@
             o_shm[i, tidx] *= o_scale
         end
 
-        # --- multiply by V ---
+        # ---- P · V --------------------------------------------------------
         sh_load_emb!(k_shm, v, k_offset, in_k_seq_bounds, Val{false}())
         @synchronize()
         mma!(o_shm, s_shm, k_shm, cfg_out, tidx, mma_acc_fn)
@@ -108,6 +122,7 @@
         k_offset += gsz
     end
 
+    # ---- write-back -------------------------------------------------------
     if in_seq_bounds || in_q_seq_bounds
         @unroll for i in 1:emb_dim
             o[i, tidx + q_offset, gidx[2], gidx[3]] = o_shm[i, tidx]
@@ -118,8 +133,10 @@
 end
 
 
+
 function _flash_attention(
-    q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4};
+    q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
+    pair::Union{Nothing,AbstractArray{T,4}} = nothing;        # NEW
     causal::Bool,
     kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing,
 ) where T
@@ -132,14 +149,15 @@ function _flash_attention(
     target_shmem = shared_memory(kab, KA.device(kab))
     gsz          = flash_attention_groupsize(T; emb_dim, target_shmem)
 
-    q_seq_tiles, kv_seq_tiles = cld.( (QL, KL), gsz )
+    q_seq_tiles, kv_seq_tiles = cld.((QL, KL), gsz)
     threads   = (gsz, 1, 1)
     ndrange   = (gsz * q_seq_tiles, H, B)
     in_bounds = QL % gsz == 0 && KL % gsz == 0
     use_mask  = kpad_mask !== nothing
+    use_pair  = pair !== nothing                                      # NEW
     scale     = T(inv(sqrt(emb_dim)))
 
-    # --- MMA tile configs (unchanged logic) -------------------------------
+    # mma tile configs ------------------------------------------------------
     BM, BK, BN = gsz, emb_dim, gsz
     TM, TN     = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg        = FATileConfig{BM,BK,BN,TM,TN,false,false,false}
@@ -147,22 +165,26 @@ function _flash_attention(
     BM, BK, BN = gsz, gsz, emb_dim
     TM, TN     = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_out    = FATileConfig{BM,BK,BN,TM,TN,false,true,true}
-    # ----------------------------------------------------------------------
 
+    # ----------------------------------------------------------------------
     o  = similar(q)
     ms = KA.allocate(kab, eltype(o), (QL,H,B))
     ls = KA.allocate(kab, eltype(o), (QL,H,B))
 
+    pair_d = use_pair ? pair :
+             KA.zeros(kab, T, (1,1,1,1))            # harmless dummy buffer
+
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
-        o, ms, ls,                # outputs
-        q, k, v, scale,           # inputs so far
-        kpad_mask,                # NEW (may be `nothing`)
+        o, ms, ls, q, k, v, pair_d, scale,          # inputs
+        kpad_mask,
         Val(emb_dim), Val(kv_seq_tiles), Val(in_bounds),
-        Val(causal), Val(use_mask); ndrange)
+        Val(causal), Val(use_mask), Val(use_pair);   # flags
+        ndrange)
 
     return o, ms, ls
 end
+
 
 
 function flash_attention_shmem_fwd(::Type{T}; emb_dim::Int, groupsize::Int)::Int where T
