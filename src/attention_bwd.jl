@@ -118,16 +118,16 @@
 
             # -------------------- dpair ----------------------------------
             if use_pair
-                row = tidx + q_offset
-                @unroll for j in 1:gsz
+                row = tidx + lo_q
+                for j in 1:gsz
                     col = j + lo_k
                     (in_seq_bounds || col ≤ size(dpair,2)) || break
-                    # gradient w.r.t. *unscaled* pair term: divide by scale
-                    @inbounds dpair[row, col, gidx[1], gidx[2]] =
-                        s_shm[tidx,j] / scale
+                    # Check bounds properly for both row and col
+                    if (in_seq_bounds || (row ≤ size(dpair,1) && col ≤ size(dpair,2))) #<-IDGI - this was a nightmare
+                        @inbounds dpair[row, col, gidx[1], gidx[2]] = s_shm[tidx,j] / scale
+                    end
                 end
             end
-
             # -------------------- dK ------------------------------------
             sh_load_emb!(d_shm, dk, lo_k, in_k_ok, Val(false))
             @synchronize()

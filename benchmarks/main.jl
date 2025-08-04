@@ -21,6 +21,7 @@ function att_padding_mask(kpadmask, other_dim; T = Float32)
     return m
 end
 
+#=
 function naive_attention(q, k, v; causal::Bool, kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
     kt = permutedims(k, (2, 1, 3, 4))
     a = (kt ⊠ q) .* inv(sqrt(size(q, 1)))
@@ -30,6 +31,22 @@ function naive_attention(q, k, v; causal::Bool, kpad_mask::Union{Nothing,Abstrac
     end
     if !isnothing(kpad_mask)
         a = a .+ att_padding_mask(kpad_mask, size(q, 2))
+    end
+    return v ⊠ naive_softmax(a; dims=1)
+end
+=#
+function naive_attention(q, k, v, pair = nothing; causal::Bool, kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
+    kt = permutedims(k, (2, 1, 3, 4))
+    a = (kt ⊠ q) .* inv(sqrt(size(q, 1)))
+    if causal
+        m = NNlib.make_causal_mask(q)
+        a = NNlib.apply_attn_mask(a, m)
+    end
+    if !isnothing(kpad_mask)
+        a = a .+ att_padding_mask(kpad_mask, size(q, 2))
+    end
+    if !isnothing(pair)
+        a = a .+ permutedims(pair, (2, 1, 3, 4))
     end
     return v ⊠ naive_softmax(a; dims=1)
 end
@@ -297,74 +314,84 @@ end
 function test_flash_attention(kab)
     Random.seed!(0)
     T = Float32
-    E, QL, KL, H, B = 64, 2048, 2048, 4, 4
-    for (causal, use_padmask) in ((false, false), (false, true), (true, false), (true, true))
-        println("Causal: $causal, use_padmask: $use_padmask")
-        q = Adapt.adapt(kab, randn(T, E, QL, H, B))
-        k = Adapt.adapt(kab, randn(T, E, KL, H, B))
-        v = Adapt.adapt(kab, randn(T, E, KL, H, B))
+    E, QL, KL, H, B = 64, 4096, 4096, 4, 4
+    for causal in (false, true)
+        for use_padmask in (true, false)
+            for use_pair in (true, false)
+                println("Causal: $causal, use_padmask: $use_padmask, use_pair: $use_pair")
+                q = Adapt.adapt(kab, randn(T, E, QL, H, B))
+                k = Adapt.adapt(kab, randn(T, E, KL, H, B))
+                v = Adapt.adapt(kab, randn(T, E, KL, H, B))
 
-        pm = nothing
-        if use_padmask
-            pm = Adapt.adapt(kab, ones(Bool, KL, B))
-            pm[end-10:end, end] .= false
-        end
+                pm = nothing
+                if use_padmask
+                    pm = Adapt.adapt(kab, ones(Bool, KL, B))
+                    pm[end-10:end, end] .= false
+                end
 
-        on = naive_attention(q, k, v; causal, kpad_mask=pm)
-        o = NNop.flash_attention(q, k, v; causal, kpad_mask=pm)
-        @assert on ≈ o
+                pair = nothing
+                if use_pair
+                    pair = Adapt.adapt(kab, randn(T, QL, KL, H, B))
+                end
 
-        ∇1 = Zygote.gradient(q, k, v) do q, k, v
-            sum(naive_attention(q, k, v; causal, kpad_mask=pm))
-        end
-        ∇2 = Zygote.gradient(q, k, v) do q, k, v
-            sum(NNop.flash_attention(q, k, v; causal, kpad_mask=pm))
-        end
+                on = naive_attention(q, k, v, pair; causal, kpad_mask=pm)
+                o = NNop.flash_attention(q, k, v, pair; causal, kpad_mask=pm)
+                @assert on ≈ o
 
-        @assert isapprox(∇1[1], ∇2[1]; atol=1e-3, rtol=1e-3)
-        @assert isapprox(∇1[2], ∇2[2]; atol=1e-3, rtol=1e-3)
-        @assert isapprox(∇1[3], ∇2[3]; atol=1e-3, rtol=1e-3)
+                ∇1 = Zygote.gradient(q, k, v, pair) do q, k, v, pair
+                    sum(naive_attention(q, k, v, pair; causal, kpad_mask=pm))
+                end
+                ∇2 = Zygote.gradient(q, k, v, pair) do q, k, v, pair
+                    sum(NNop.flash_attention(q, k, v, pair; causal, kpad_mask=pm))
+                end
 
-        GC.gc(false)
-        GC.gc(true)
+                @assert isapprox(∇1[1], ∇2[1]; atol=1e-3, rtol=1e-3)
+                @assert isapprox(∇1[2], ∇2[2]; atol=1e-3, rtol=1e-3)
+                @assert isapprox(∇1[3], ∇2[3]; atol=1e-3, rtol=1e-3)
+                !isnothing(pair) && @assert isapprox(∇1[4], ∇2[4]; atol=1e-3, rtol=1e-3)
 
-        cache = GPUArrays.AllocCache()
+                GC.gc(false)
+                GC.gc(true)
 
-        println("Naїve attention FWD:")
-        @btime GPUArrays.@cached $cache begin
-            naive_attention($q, $k, $v; causal=$causal, kpad_mask=$pm)
-            KA.synchronize($kab)
-        end
-        println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-        GPUArrays.unsafe_free!(cache)
+                cache = GPUArrays.AllocCache()
 
-        println("Flash attention FWD:")
-        @btime GPUArrays.@cached $cache begin
-            NNop.flash_attention($q, $k, $v; causal=$causal, kpad_mask=$pm)
-            KA.synchronize($kab)
-        end
-        println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-        GPUArrays.unsafe_free!(cache)
+                println("Naїve attention FWD:")
+                @btime GPUArrays.@cached $cache begin
+                    naive_attention($q, $k, $v, $pair; causal=$causal, kpad_mask=$pm)
+                    KA.synchronize($kab)
+                end
+                println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+                GPUArrays.unsafe_free!(cache)
 
-        println("Naїve attention FWD + BWD:")
-        @btime GPUArrays.@cached $cache begin
-            ∇ = Zygote.gradient($q, $k, $v) do q, k, v
-                sum(naive_attention(q, k, v; causal=$causal, kpad_mask=$pm))
+                println("Flash attention FWD:")
+                @btime GPUArrays.@cached $cache begin
+                    NNop.flash_attention($q, $k, $v, $pair; causal=$causal, kpad_mask=$pm)
+                    KA.synchronize($kab)
+                end
+                println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+                GPUArrays.unsafe_free!(cache)
+
+                println("Naїve attention FWD + BWD:")
+                @btime GPUArrays.@cached $cache begin
+                    ∇ = Zygote.gradient($q, $k, $v, $pair) do q, k, v, pair
+                        sum(naive_attention(q, k, v, $pair; causal=$causal, kpad_mask=$pm))
+                    end
+                    KA.synchronize($kab)
+                end
+                println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+                GPUArrays.unsafe_free!(cache)
+
+                println("Flash attention FWD + BWD:")
+                @btime GPUArrays.@cached $cache begin
+                    Zygote.gradient($q, $k, $v, $pair) do q, k, v, pair
+                        sum(NNop.flash_attention(q, k, v, $pair; causal=$causal, kpad_mask=$pm))
+                    end
+                    KA.synchronize($kab)
+                end
+                println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
+                GPUArrays.unsafe_free!(cache)
             end
-            KA.synchronize($kab)
         end
-        println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-        GPUArrays.unsafe_free!(cache)
-
-        println("Flash attention FWD + BWD:")
-        @btime GPUArrays.@cached $cache begin
-            Zygote.gradient($q, $k, $v) do q, k, v
-                sum(NNop.flash_attention(q, k, v; causal=$causal, kpad_mask=$pm))
-            end
-            KA.synchronize($kab)
-        end
-        println(" - Peak memory usage: $(Base.format_bytes(sizeof(cache)))")
-        GPUArrays.unsafe_free!(cache)
     end
     return
 end
