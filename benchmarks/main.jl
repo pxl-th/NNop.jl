@@ -532,4 +532,111 @@ Naїve attention FWD + BWD:
 Flash attention FWD + BWD:
   56.244 ms (729 allocations: 26.67 KiB)
  - Peak memory usage: 48.376 MiB
+
+
+ #New version with transposed pairs:
+Causal: false, use_padmask: true, use_pair: true
+Naїve attention FWD:
+  8.631 ms (1171 allocations: 40.78 KiB)
+ - Peak memory usage: 1.828 GiB
+Flash attention FWD:
+  2.749 ms (140 allocations: 5.03 KiB)
+ - Peak memory usage: 8.250 MiB
+Naїve attention FWD + BWD:
+  147.802 ms (3912 allocations: 257.26 MiB)
+ - Peak memory usage: 5.182 GiB
+Flash attention FWD + BWD:
+  121.685 ms (907 allocations: 35.41 KiB)
+ - Peak memory usage: 304.376 MiB
+Causal: false, use_padmask: true, use_pair: false
+Naїve attention FWD:
+  6.131 ms (974 allocations: 33.38 KiB)
+ - Peak memory usage: 1.328 GiB
+Flash attention FWD:
+  2.662 ms (147 allocations: 5.19 KiB)
+ - Peak memory usage: 8.250 MiB
+Naїve attention FWD + BWD:
+  142.751 ms (3624 allocations: 257.25 MiB)
+ - Peak memory usage: 4.432 GiB
+Flash attention FWD + BWD:
+  116.865 ms (911 allocations: 34.86 KiB)
+ - Peak memory usage: 48.376 MiB
+Causal: false, use_padmask: false, use_pair: true
+Naїve attention FWD:
+  7.763 ms (781 allocations: 26.62 KiB)
+ - Peak memory usage: 1.516 GiB
+Flash attention FWD:
+  2.688 ms (130 allocations: 4.88 KiB)
+ - Peak memory usage: 8.250 MiB
+Naїve attention FWD + BWD:
+  146.987 ms (3499 allocations: 257.25 MiB)
+ - Peak memory usage: 4.807 GiB
+Flash attention FWD + BWD:
+  119.583 ms (887 allocations: 34.73 KiB)
+ - Peak memory usage: 304.376 MiB
+Causal: false, use_padmask: false, use_pair: false
+Naїve attention FWD:
+  5.056 ms (584 allocations: 19.22 KiB)
+ - Peak memory usage: 1.016 GiB
+Flash attention FWD:
+  2.600 ms (137 allocations: 5.03 KiB)
+ - Peak memory usage: 8.250 MiB
+Naїve attention FWD + BWD:
+  141.849 ms (3209 allocations: 257.24 MiB)
+ - Peak memory usage: 4.057 GiB
+Flash attention FWD + BWD:
+  112.466 ms (891 allocations: 34.03 KiB)
+ - Peak memory usage: 48.376 MiB
+ Causal: true, use_padmask: true, use_pair: true
+Naїve attention FWD:
+  9.781 ms (1400 allocations: 48.00 KiB)
+ - Peak memory usage: 2.086 GiB
+Flash attention FWD:
+  1.517 ms (140 allocations: 5.03 KiB)
+ - Peak memory usage: 8.250 MiB
+Naїve attention FWD + BWD:
+  157.190 ms (4752 allocations: 257.29 MiB)
+ - Peak memory usage: 7.205 GiB
+Flash attention FWD + BWD:
+  62.597 ms (907 allocations: 35.41 KiB)
+ - Peak memory usage: 304.376 MiB
+Causal: true, use_padmask: true, use_pair: false
+Naїve attention FWD:
+  6.954 ms (1203 allocations: 40.59 KiB)
+ - Peak memory usage: 1.586 GiB
+Flash attention FWD:
+  1.489 ms (147 allocations: 5.19 KiB)
+ - Peak memory usage: 8.250 MiB
+Naїve attention FWD + BWD:
+  153.156 ms (4462 allocations: 257.28 MiB)
+ - Peak memory usage: 6.455 GiB
+Flash attention FWD + BWD:
+  60.154 ms (911 allocations: 34.86 KiB)
+ - Peak memory usage: 48.376 MiB
+Causal: true, use_padmask: false, use_pair: true
+Naїve attention FWD:
+  8.731 ms (1010 allocations: 33.84 KiB)
+ - Peak memory usage: 1.774 GiB
+Flash attention FWD:
+  1.551 ms (130 allocations: 4.88 KiB)
+ - Peak memory usage: 8.250 MiB
+Naїve attention FWD + BWD:
+  156.284 ms (4337 allocations: 257.28 MiB)
+ - Peak memory usage: 6.830 GiB
+Flash attention FWD + BWD:
+  62.629 ms (887 allocations: 34.73 KiB)
+ - Peak memory usage: 304.376 MiB
+Causal: true, use_padmask: false, use_pair: false
+Naїve attention FWD:
+  5.835 ms (813 allocations: 26.44 KiB)
+ - Peak memory usage: 1.274 GiB
+Flash attention FWD:
+  1.445 ms (138 allocations: 5.06 KiB)
+ - Peak memory usage: 8.250 MiB
+Naїve attention FWD + BWD:
+  151.567 ms (4047 allocations: 257.26 MiB)
+ - Peak memory usage: 6.080 GiB
+Flash attention FWD + BWD:
+  58.983 ms (892 allocations: 34.06 KiB)
+ - Peak memory usage: 48.376 MiB
 =#
