@@ -8,13 +8,20 @@
     pair::AbstractArray{T,4},                              # ← pair tensor
     scale::T,
     kpad_mask,
-    ::Val{emb_dim}, ::Val{q_seq_tiles}, ::Val{kv_seq_tiles},
+    ::Val{emb_dim}, 
+    #::Val{q_seq_tiles}, #Trying to reduce recompilation
+    #::Val{kv_seq_tiles},
     ::Val{in_seq_bounds}, ::Val{causal},
     ::Val{use_padmask}, ::Val{use_pair},
-) where {T, emb_dim, q_seq_tiles, kv_seq_tiles,
+) where {T, emb_dim, 
+        #q_seq_tiles, 
+        #kv_seq_tiles,
          in_seq_bounds, causal, use_padmask, use_pair}
 
     gsz = @groupsize()[1]
+
+    q_seq_tiles = cld(size(q, 2), gsz)
+    kv_seq_tiles = cld(size(k, 2), gsz)
 
     # ------------------------------------------------------------------ shmem
     q_shm = @localmem Float16 (gsz, emb_dim)
@@ -60,11 +67,12 @@
             # ---- add pair logits so that soft-max matches forward ------
             if use_pair
                 for j in 1:gsz
-                    (in_seq_bounds || lo_k+j ≤ size(pair,2)) || break
-                    (in_seq_bounds || q_offset+tidx ≤ size(pair,1)) || break  # Add this line
-                    s_shm[tidx,j] += @inbounds pair[q_offset+tidx,
+                    (in_seq_bounds || lo_k+j ≤ size(pair,3)) || break
+                    (in_seq_bounds || q_offset+tidx ≤ size(pair,2)) || break  # Add this line
+                    s_shm[tidx,j] += @inbounds pair[gidx[1],
+                                                    q_offset+tidx,
                                                     lo_k+j,
-                                                    gidx[1], gidx[2]]
+                                                    gidx[2]]
                 end
             end
 
@@ -122,9 +130,9 @@
                 row = tidx + lo_q
                 for j in 1:gsz
                     col = j + lo_k
-                    (in_seq_bounds || col ≤ size(dpair,2)) || break
-                    if (in_seq_bounds || row ≤ size(dpair,1))  # Simplified bounds check
-                        @inbounds dpair[row, col, gidx[1], gidx[2]] = s_shm[tidx,j] / scale
+                    (in_seq_bounds || col ≤ size(dpair,3)) || break
+                    if (in_seq_bounds || row ≤ size(dpair,2))  # Simplified bounds check
+                        @inbounds dpair[gidx[1], row, col, gidx[2]] = s_shm[tidx,j] / scale
                     end
                 end
             end
@@ -259,7 +267,8 @@ function ∇flash_attention(
         o, ms,
         q, k, v, (use_pair ? pair : dp),              # pass real or dummy
         scale, kpad_mask,
-        Val(emb_dim), Val(q_tiles), Val(k_tiles),
+        Val(emb_dim), 
+        #Val(q_tiles), Val(k_tiles),  #Trying to reduce recompilation
         Val(in_bounds), Val(causal), Val(use_mask), Val(use_pair);
         ndrange)
 

@@ -60,9 +60,10 @@
             for i in 1:gsz
                 (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
                 in_q_seq_bounds || break
-                s_shm[tidx, i] += @inbounds pair[q_offset + tidx,
+                s_shm[tidx, i] += @inbounds pair[gidx[2],
+                                                 q_offset + tidx,
                                                  k_offset + i,
-                                                 gidx[2], gidx[3]]
+                                                 gidx[3]]
             end
         end
 
@@ -209,7 +210,7 @@ function flash_attention_groupsize(::Type{T}; emb_dim::Int, target_shmem::UInt64
     # qk_fp16s = (false, true)
     # TODO prefer bigger groupsize?
     qk_fp16s = (true,)
-    for qk_fp16 in qk_fp16s, groupsize in (256, 128, 64, 32)
+    for qk_fp16 in qk_fp16s, groupsize in (256, 128, 64, 32, 16)
         shmem = flash_attention_shmem_bwd(T; emb_dim, groupsize, qk_fp16)
         shmem ≤ target_shmem && return groupsize
     end

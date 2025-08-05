@@ -32,7 +32,8 @@ function naive_attention(q, k, v, pair = nothing; causal::Bool, kpad_mask::Union
         a = a .+ att_padding_mask(kpad_mask, size(q, 2))
     end
     if !isnothing(pair)
-        a = a .+ permutedims(pair, (2, 1, 3, 4))
+        #a = a .+ permutedims(pair, (2, 1, 3, 4)) #Currently comes in as QL, KL, H, B, and gets shifted to KL, QL, H, B
+        a = a .+ permutedims(pair, (3, 2, 1, 4)) #When it comes in as H-QL-KL-B
     end
     return v ⊠ naive_softmax(a; dims=1)
 end
@@ -317,7 +318,8 @@ function test_flash_attention(kab)
 
                 pair = nothing
                 if use_pair
-                    pair = Adapt.adapt(kab, randn(T, QL, KL, H, B))
+                    #pair = Adapt.adapt(kab, randn(T, QL, KL, H, B))
+                    pair = Adapt.adapt(kab, randn(T, H, QL, KL, B))
                 end
 
                 on = naive_attention(q, k, v, pair; causal, kpad_mask=pm)
@@ -396,8 +398,8 @@ test_flash_attention(kab)
 =#
 
 #=
-Benchmark timings:
-On RTX6000Ada:
+Benchmark timings (On RTX6000Ada)
+From this branch:
 Causal: false, use_padmask: true, use_pair: true
 Naїve attention FWD:
   8.700 ms (1171 allocations: 40.78 KiB)
@@ -503,9 +505,7 @@ Flash attention FWD + BWD:
   58.142 ms (891 allocations: 34.03 KiB)
  - Peak memory usage: 48.376 MiB
 
-
-
-#FROM MASTER - NOTE NAIVE IS SLOWER HERE:
+FROM MASTER
 Causal = false
 Naїve attention FWD:
   6.367 ms (734 allocations: 24.20 KiB)
@@ -519,7 +519,6 @@ Naїve attention FWD + BWD:
 Flash attention FWD + BWD:
   110.776 ms (729 allocations: 26.67 KiB)
  - Peak memory usage: 48.376 MiB
-
  Causal = true
  Naїve attention FWD:
   7.275 ms (963 allocations: 31.42 KiB)
