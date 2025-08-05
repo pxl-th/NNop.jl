@@ -59,7 +59,7 @@
 
             # ---- add pair logits so that soft-max matches forward ------
             if use_pair
-                @unroll for j in 1:gsz
+                for j in 1:gsz
                     (in_seq_bounds || lo_k+j ≤ size(pair,2)) || break
                     (in_seq_bounds || q_offset+tidx ≤ size(pair,1)) || break  # Add this line
                     s_shm[tidx,j] += @inbounds pair[q_offset+tidx,
@@ -70,14 +70,14 @@
 
             # ---------------- causal / pad masks ------------------------
             if causal
-                @unroll for j in 1:gsz
+                for j in 1:gsz
                     (in_seq_bounds || j+lo_k ≤ size(k,2)) || break
                     s_shm[tidx,j] = tidx+q_offset ≥ j+lo_k ?
                                     s_shm[tidx,j] : typemin(T)
                 end
             end
             if use_padmask
-                @unroll for j in 1:gsz
+                for j in 1:gsz
                     (in_seq_bounds || j+lo_k ≤ size(k,2)) || break
                     valid = @inbounds kpad_mask[j+lo_k, gidx[2]]
                     s_shm[tidx,j] = valid ? s_shm[tidx,j] : typemin(T)
@@ -87,7 +87,7 @@
             # ---------------- soft-max reconstruction -------------------
             in_ms = in_seq_bounds || tidx + lo_q ≤ size(ms,1)
             m_i   = in_ms ? ms[tidx+lo_q, gidx[1], gidx[2]] : typemax(T)
-            @unroll for j in 1:gsz
+            for j in 1:gsz
                 s_shm[tidx,j] = exp(s_shm[tidx,j] - m_i)
             end
 

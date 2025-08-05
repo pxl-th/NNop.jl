@@ -57,9 +57,8 @@
 
         # ---- add pair features -------------------------------------------
         if use_pair
-            @unroll for i in 1:gsz
+            for i in 1:gsz
                 (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
-                #(in_seq_bounds || q_offset + tidx ≤ size(q, 2)) || break
                 in_q_seq_bounds || break
                 s_shm[tidx, i] += @inbounds pair[q_offset + tidx,
                                                  k_offset + i,
@@ -85,12 +84,12 @@
 
         # ---- online soft-max ---------------------------------------------
         m_ij = typemin(T)
-        @unroll for i in 1:gsz
+        for i in 1:gsz
             m_ij = max(m_ij, s_shm[tidx, i])
         end
 
         l_ij = zero(T)
-        @unroll for i in 1:gsz
+        for i in 1:gsz
             (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
             tmp        = exp(s_shm[tidx, i] - m_ij)
             l_ij      += tmp
@@ -106,7 +105,7 @@
         p_scale = β / l_i_new
         o_scale = l_i / l_i_new * α
 
-        @unroll for i in 1:gsz
+        for i in 1:gsz
             s_shm[tidx, i] *= p_scale
         end
         @unroll for i in 1:emb_dim
