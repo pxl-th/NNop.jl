@@ -4,15 +4,15 @@
     o::AbstractArray{T, 4}, ms::AbstractArray{T, 3}, ls::AbstractArray{T, 3},
     # inputs
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
-    pair::AbstractArray{T, 4},                               # NEW
+    pair::AbstractArray{T, 4},
     scale::T,
     kpad_mask,
     ::Val{emb_dim}, ::Val{kv_seq_tiles}, ::Val{in_seq_bounds},
-    ::Val{causal},  ::Val{use_padmask}, ::Val{use_pair},     # NEW flag
+    ::Val{causal},  ::Val{use_padmask}, ::Val{use_pair},
 ) where {T, emb_dim, kv_seq_tiles, in_seq_bounds,
          causal, use_padmask, use_pair}
 
-    gsz      = @groupsize()[1]
+    gsz = @groupsize()[1]
 
     # shared-memory buffers ------------------------------------------------
     q_shm = @localmem T (gsz, emb_dim)
@@ -25,8 +25,7 @@
     q_offset = (gidx[1] - 1) * gsz
     in_q_seq_bounds = in_seq_bounds || q_offset + tidx ≤ size(q, 2)
 
-    @inline function sh_load_emb!(dest, src, offset, mask::Bool,
-                                  ::Val{tr}) where tr
+    @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}) where tr
         @unroll for i in 1:emb_dim
             x, y = tr ? (tidx, i) : (i, tidx)
             @inbounds dest[x, y] = mask ? src[i, tidx + offset, gidx[2], gidx[3]] : zero(T)
@@ -138,7 +137,7 @@ end
 
 function _flash_attention(
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
-    pair::Union{Nothing,AbstractArray{T,4}} = nothing;        # NEW
+    pair::Union{Nothing,AbstractArray{T,4}} = nothing;
     causal::Bool,
     kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing,
 ) where T
@@ -156,7 +155,7 @@ function _flash_attention(
     ndrange   = (gsz * q_seq_tiles, H, B)
     in_bounds = QL % gsz == 0 && KL % gsz == 0
     use_mask  = kpad_mask !== nothing
-    use_pair  = pair !== nothing                                      # NEW
+    use_pair  = pair !== nothing
     scale     = T(inv(sqrt(emb_dim)))
 
     # mma tile configs ------------------------------------------------------

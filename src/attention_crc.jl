@@ -3,7 +3,7 @@ ChainRulesCore.rrule(::typeof(within_gradient), x) = true, _ -> (NoTangent(), No
 
 
 function flash_attention(
-    q, k, v, pair=nothing;                          # NEW
+    q, k, v, pair=nothing;
     causal::Bool,
     kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
     o = _flash_attention(q, k, v, pair; causal, kpad_mask=kpad_mask)
@@ -14,7 +14,7 @@ end
 
 
 function ChainRulesCore.rrule(::typeof(_flash_attention),
-    q, k, v, pair=nothing;                          # NEW
+    q, k, v, pair=nothing;
     causal::Bool,
     kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
 

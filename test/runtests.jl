@@ -34,7 +34,6 @@ function att_padding_mask(kpadmask, other_dim; T = Float32)
     return m
 end
 
-
 function naive_attention(q, k, v, pair = nothing; causal::Bool, kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
     kt = permutedims(k, (2, 1, 3, 4))
     a = (kt ⊠ q) .* inv(sqrt(size(q, 1)))
@@ -46,7 +45,6 @@ function naive_attention(q, k, v, pair = nothing; causal::Bool, kpad_mask::Union
         a = a .+ att_padding_mask(kpad_mask, size(q, 2))
     end
     if !isnothing(pair)
-        #a = a .+ permutedims(pair, (2, 1, 3, 4))
         a = a .+ permutedims(pair, (3, 2, 1, 4)) #When it comes in as H-QL-KL-B
     end
     return v ⊠ naive_softmax(a; dims=1)
@@ -107,11 +105,11 @@ end
     ), T in (
         Float32, # TODO more types
     ), E in (
-        16, 32, #64, # TODO test on higher if applicable
+        16, 32, 64, # TODO test on higher if applicable
     ), QL in (
-        255, 256, #511, 512, 1024,
+        255, 256, 511, 512, 1024,
     ), KL in (
-        255, 256, #511, 512, 1024,
+        255, 256, 511, 512, 1024,
     )
         causal && QL != KL && continue
 
@@ -129,7 +127,6 @@ end
 
         pair = nothing
         if use_pair
-            #pair = Adapt.adapt(kab, randn(T, QL, KL, H, B))
             pair = Adapt.adapt(kab, randn(T, H, QL, KL, B))
         end
 

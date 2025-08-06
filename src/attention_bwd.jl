@@ -9,14 +9,9 @@
     scale::T,
     kpad_mask,
     ::Val{emb_dim}, 
-    #::Val{q_seq_tiles}, #Trying to reduce recompilation
-    #::Val{kv_seq_tiles},
     ::Val{in_seq_bounds}, ::Val{causal},
     ::Val{use_padmask}, ::Val{use_pair},
-) where {T, emb_dim, 
-        #q_seq_tiles, 
-        #kv_seq_tiles,
-         in_seq_bounds, causal, use_padmask, use_pair}
+) where {T, emb_dim, in_seq_bounds, causal, use_padmask, use_pair}
 
     gsz = @groupsize()[1]
 
@@ -68,7 +63,7 @@
             if use_pair
                 for j in 1:gsz
                     (in_seq_bounds || lo_k+j ≤ size(pair,3)) || break
-                    (in_seq_bounds || q_offset+tidx ≤ size(pair,2)) || break  # Add this line
+                    (in_seq_bounds || q_offset+tidx ≤ size(pair,2)) || break  
                     s_shm[tidx,j] += @inbounds pair[gidx[1],
                                                     q_offset+tidx,
                                                     lo_k+j,
@@ -123,7 +118,7 @@
                      end
                      out[x,y] * (res - d_i) * scale
                  end)
-            @synchronize()                               # s_shm is now dS
+            @synchronize()
 
             # -------------------- dpair ----------------------------------
             if use_pair
@@ -131,7 +126,7 @@
                 for j in 1:gsz
                     col = j + lo_k
                     (in_seq_bounds || col ≤ size(dpair,3)) || break
-                    if (in_seq_bounds || row ≤ size(dpair,2))  # Simplified bounds check
+                    if (in_seq_bounds || row ≤ size(dpair,2))
                         @inbounds dpair[gidx[1], row, col, gidx[2]] = s_shm[tidx,j] / scale
                     end
                 end
@@ -209,7 +204,7 @@ function ∇flash_attention(
     Δ::AbstractArray{T,4},
     o::AbstractArray{T,4}, ms::AbstractArray{T,3}, ls::AbstractArray{T,3},
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
-    pair::Union{Nothing,AbstractArray{T,4}} = nothing;           # ← NEW arg
+    pair::Union{Nothing,AbstractArray{T,4}} = nothing;
     causal::Bool,
     kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing,
 ) where T
@@ -267,9 +262,7 @@ function ∇flash_attention(
         o, ms,
         q, k, v, (use_pair ? pair : dp),              # pass real or dummy
         scale, kpad_mask,
-        Val(emb_dim), 
-        #Val(q_tiles), Val(k_tiles),  #Trying to reduce recompilation
-        Val(in_bounds), Val(causal), Val(use_mask), Val(use_pair);
+        Val(emb_dim), Val(in_bounds), Val(causal), Val(use_mask), Val(use_pair);
         ndrange)
 
     return dq, dk, dv, (use_pair ? dp : nothing)
