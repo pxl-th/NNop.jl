@@ -30,7 +30,7 @@ end
 
 function att_padding_mask(kpadmask, other_dim; T = Float32)
     pm = T.(kpadmask)
-    m = NNop.ChainRulesCore.@ignore_derivatives log.(reshape(pm, size(pm,1), 1, 1, size(pm,2)) .* (similar(pm, 1, other_dim, 1, size(pm,2)) .= 1))
+    m = NNop.CRC.@ignore_derivatives log.(reshape(pm, size(pm,1), 1, 1, size(pm,2)) .* (similar(pm, 1, other_dim, 1, size(pm,2)) .= 1))
     return m
 end
 
