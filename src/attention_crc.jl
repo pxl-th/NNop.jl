@@ -1,31 +1,31 @@
 within_gradient(x) = false
-ChainRulesCore.rrule(::typeof(within_gradient), x) = true, _ -> (NoTangent(), NoTangent())
-
+CRC.rrule(::typeof(within_gradient), x) = true, _ -> (NoTangent(), NoTangent())
 
 function flash_attention(
-    q, k, v, pair=nothing;
+    q, k, v,
+    pair::Maybe{AbstractArray{<:Real, 4}} = nothing;
     causal::Bool,
-    kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
-    o = _flash_attention(q, k, v, pair; causal, kpad_mask=kpad_mask)
+    kpad_mask::Maybe{AbstractMatrix{Bool}} = nothing,
+)
+    o = _flash_attention(q, k, v, pair; causal, kpad_mask)
     within_gradient(q) && return o
     @assert length(o) == 3
     return o[1]
 end
 
-
-function ChainRulesCore.rrule(::typeof(_flash_attention),
-    q, k, v, pair=nothing;
+function CRC.rrule(::typeof(_flash_attention),
+    q, k, v,
+    pair::Maybe{AbstractArray{<:Real, 4}} = nothing;
     causal::Bool,
-    kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
-
-    o, ms, ls = _flash_attention(q, k, v, pair; causal, kpad_mask=kpad_mask)
+    kpad_mask::Maybe{AbstractMatrix{Bool}} = nothing,
+)
+    o, ms, ls = _flash_attention(q, k, v, pair; causal, kpad_mask)
 
     function _pullback(Δ)
         dq, dk, dv, dpair = ∇flash_attention(
-            ChainRulesCore.unthunk(Δ),
-            o, ms, ls, q, k, v, pair;
-            causal, kpad_mask=kpad_mask)
-        return ChainRulesCore.NoTangent(), dq, dk, dv, dpair
+            CRC.unthunk(Δ),
+            o, ms, ls, q, k, v, pair; causal, kpad_mask)
+        return CRC.NoTangent(), dq, dk, dv, dpair
     end
     return o, _pullback
 end

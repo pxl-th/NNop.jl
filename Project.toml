@@ -21,7 +21,7 @@ NNopAMDGPUExt = "AMDGPU"
 NNopCUDAExt = "CUDA"
 
 [compat]
-AMDGPU = "1.2.5"
+AMDGPU = "1.2.5, 2"
 CUDA = "5"
 ChainRulesCore = "1.25.1"
 KernelAbstractions = "0.9.34"

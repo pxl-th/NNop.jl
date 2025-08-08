@@ -6,9 +6,11 @@ using StaticArrays
 using Memoize: @memoize
 using LRUCache: LRU
 
-import ChainRulesCore
+import ChainRulesCore as CRC
 import KernelAbstractions as KA
 import SIMD
+
+Maybe{T} = Union{T, Nothing}
 
 include("simd.jl")
 include("groupreduce.jl")

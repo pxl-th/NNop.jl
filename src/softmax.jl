@@ -79,10 +79,8 @@ function ∇online_softmax(Δ::AbstractArray{T}, y::AbstractArray{S}) where {T, 
     end
 end
 
-function ChainRulesCore.rrule(::typeof(online_softmax), x)
+function CRC.rrule(::typeof(online_softmax), x)
     y = online_softmax(x)
-    _pullback(Δ) = (
-        ChainRulesCore.NoTangent(),
-        ∇online_softmax(ChainRulesCore.unthunk(Δ), y))
+    _pullback(Δ) = (CRC.NoTangent(), ∇online_softmax(CRC.unthunk(Δ), y))
     return y, _pullback
 end

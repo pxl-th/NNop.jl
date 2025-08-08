@@ -175,11 +175,11 @@ function rms_norm(x, w; ϵ::Float32 = 1f-6, offset::Float32 = 0f0)
     return y[1]
 end
 
-function ChainRulesCore.rrule(::typeof(_rms_norm), x, w; ϵ::Float32 = 1f-6, offset::Float32 = 0f0)
+function CRC.rrule(::typeof(_rms_norm), x, w; ϵ::Float32 = 1f-6, offset::Float32 = 0f0)
     y, rms = _rms_norm(x, w; ϵ, offset)
     function _pullback(Δ)
-        dx, dw = ∇rms_norm(ChainRulesCore.unthunk(Δ), rms, x, w; offset)
-        return ChainRulesCore.NoTangent(), dx, dw
+        dx, dw = ∇rms_norm(CRC.unthunk(Δ), rms, x, w; offset)
+        return CRC.NoTangent(), dx, dw
     end
     return y, _pullback
 end

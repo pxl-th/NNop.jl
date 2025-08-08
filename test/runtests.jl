@@ -94,10 +94,9 @@ end
         end
         @assert isapprox(∇1[1], ∇2[1]; atol=1f-6, rtol=1f-6)
     end
-    
 
-    for causal in (
-        true, false
+    @testset "Flash Attention: causal=$causal, padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, QL=$QL, KL=$KL" for causal in (
+        false, true
     ), use_padmask in (
         false, true,
     ), use_pair in (
@@ -119,10 +118,10 @@ end
         k = Adapt.adapt(kab, randn(T, E, KL, H, B))
         v = Adapt.adapt(kab, randn(T, E, KL, H, B))
 
-        pm = nothing
+        kpad_mask = nothing
         if use_padmask
-            pm = Adapt.adapt(kab, ones(Bool, KL, B))
-            pm[end-10:end, end] .= false
+            kpad_mask = Adapt.adapt(kab, ones(Bool, KL, B))
+            kpad_mask[end-10:end, end] .= false
         end
 
         pair = nothing
@@ -130,33 +129,18 @@ end
             pair = Adapt.adapt(kab, randn(T, H, QL, KL, B))
         end
 
-        @testset "Flash Attention - forward: causal=$causal, padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, QL=$QL, KL=$KL" begin
-            on = naive_attention(q, k, v, pair; causal, kpad_mask=pm)
-            o = NNop.flash_attention(q, k, v, pair; causal, kpad_mask=pm)
-            @test isapprox(on, o; atol=1e-3, rtol=1e-3)
+        o1, ∇1 = Zygote.withgradient(q, k, v, pair) do q, k, v, pair
+            sum(naive_attention(q, k, v, pair; causal, kpad_mask))
         end
-
-        @testset "Flash Attention - reverse: causal=$causal, padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, QL=$QL, KL=$KL" begin
-            ∇1 = Zygote.gradient(q, k, v, pair) do q, k, v, pair
-                sum(naive_attention(q, k, v, pair; causal, kpad_mask=pm))
-            end
-            ∇2 = Zygote.gradient(q, k, v, pair) do q, k, v, pair
-                sum(NNop.flash_attention(q, k, v, pair; causal, kpad_mask=pm))
-            end
-            @testset "Flash Attention - reverse ∇1[1]: causal=$causal, padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, QL=$QL, KL=$KL" begin
-                @test isapprox(∇1[1], ∇2[1]; atol=1e-3, rtol=1e-3)
-            end
-            @testset "Flash Attention - reverse ∇1[2]: causal=$causal, padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, QL=$QL, KL=$KL" begin
-                @test isapprox(∇1[2], ∇2[2]; atol=1e-3, rtol=1e-3)
-            end
-            @testset "Flash Attention - reverse ∇1[3]: causal=$causal, padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, QL=$QL, KL=$KL" begin
-                @test isapprox(∇1[3], ∇2[3]; atol=1e-3, rtol=1e-3)
-            end
-            if !isnothing(pair)
-                @testset "Flash Attention - reverse ∇1[4]: causal=$causal, padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, QL=$QL, KL=$KL" begin
-                    @test isapprox(∇1[4], ∇2[4]; atol=1e-3, rtol=1e-3)
-                end
-            end
+        o2, ∇2 = Zygote.withgradient(q, k, v, pair) do q, k, v, pair
+            sum(NNop.flash_attention(q, k, v, pair; causal, kpad_mask))
+        end
+        @test isapprox(o1, o2; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[1], ∇2[1]; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[2], ∇2[2]; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[3], ∇2[3]; atol=1e-3, rtol=1e-3)
+        if !isnothing(pair)
+            @test isapprox(∇1[4], ∇2[4]; atol=1e-3, rtol=1e-3)
         end
     end
 
@@ -243,5 +227,5 @@ end
         end
         @test isapprox(∇1[1], ∇2[1]; atol=1f-6, rtol=1f-6)
         @test isapprox(∇1[2], ∇2[2]; atol=1f-6, rtol=1f-6)
-    end    
+    end
 end

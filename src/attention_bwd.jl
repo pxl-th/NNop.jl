@@ -1,29 +1,25 @@
 @kernel unsafe_indices=true cpu=false inbounds=true function _flash_attention_bwd!(
     cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
     dq::AbstractArray{T,4}, dk::AbstractArray{T,4}, dv::AbstractArray{T,4},
-    dpair::AbstractArray{T,4},                             # ← grads for pairs
+    dpair::AbstractArray{T,4}, # ← grads for pairs
     Δ::AbstractArray{T,4}, δ::AbstractArray{T,3},
     o::AbstractArray{T,4}, ms::AbstractArray{T,3},
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
-    pair::AbstractArray{T,4},                              # ← pair tensor
     scale::T,
-    kpad_mask,
-    ::Val{emb_dim}, 
-    ::Val{in_seq_bounds}, ::Val{causal},
-    ::Val{use_padmask}, ::Val{use_pair},
-) where {T, emb_dim, in_seq_bounds, causal, use_padmask, use_pair}
-
+    pair::Maybe{AbstractArray{T,4}}, # ← pair tensor
+    kpad_mask::Maybe{AbstractMatrix{Bool}},
+    ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal},
+) where {T, emb_dim, in_seq_bounds, causal}
     gsz = @groupsize()[1]
-
     q_seq_tiles = cld(size(q, 2), gsz)
     kv_seq_tiles = cld(size(k, 2), gsz)
 
     # ------------------------------------------------------------------ shmem
     q_shm = @localmem Float16 (gsz, emb_dim)
     k_shm = @localmem Float16 (emb_dim, gsz)
-    s_shm = @localmem T      (gsz, gsz)   # scores / dS
-    Δ_shm = @localmem T      (emb_dim, gsz)
-    d_shm = @localmem T      (emb_dim, gsz)
+    s_shm = @localmem T       (gsz, gsz)   # scores / dS
+    Δ_shm = @localmem T       (emb_dim, gsz)
+    d_shm = @localmem T       (emb_dim, gsz)
 
     tidx = @index(Local)
     gidx = @index(Group, NTuple)          # (head, batch) in this kernel
@@ -56,42 +52,38 @@
 
             # ------------- recompute raw scores -------------------------
             mma!(s_shm, q_shm, k_shm, cfg, tidx,
-                 (res,_,__,___)->res*scale)
+                (res,_,__,___) -> res * scale)
             @synchronize()
 
             # ---- add pair logits so that soft-max matches forward ------
-            if use_pair
-                for j in 1:gsz
-                    (in_seq_bounds || lo_k+j ≤ size(pair,3)) || break
-                    (in_seq_bounds || q_offset+tidx ≤ size(pair,2)) || break  
-                    s_shm[tidx,j] += @inbounds pair[gidx[1],
-                                                    q_offset+tidx,
-                                                    lo_k+j,
-                                                    gidx[2]]
+            if !isnothing(pair)
+                @unroll for j in 1:gsz
+                    (in_seq_bounds || lo_k + j ≤ size(pair,3)) || break
+                    (in_seq_bounds || q_offset + tidx ≤ size(pair,2)) || break
+                    s_shm[tidx, j] += pair[gidx[1], q_offset + tidx, lo_k + j, gidx[2]]
                 end
             end
 
             # ---------------- causal / pad masks ------------------------
             if causal
-                for j in 1:gsz
-                    (in_seq_bounds || j+lo_k ≤ size(k,2)) || break
-                    s_shm[tidx,j] = tidx+q_offset ≥ j+lo_k ?
-                                    s_shm[tidx,j] : typemin(T)
+                @unroll for j in 1:gsz
+                    (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
+                    s_shm[tidx, j] = tidx + q_offset ≥ j + lo_k ? s_shm[tidx, j] : typemin(T)
                 end
             end
-            if use_padmask
-                for j in 1:gsz
-                    (in_seq_bounds || j+lo_k ≤ size(k,2)) || break
-                    valid = @inbounds kpad_mask[j+lo_k, gidx[2]]
-                    s_shm[tidx,j] = valid ? s_shm[tidx,j] : typemin(T)
+            if !isnothing(kpad_mask)
+                @unroll for j in 1:gsz
+                    (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
+                    valid = kpad_mask[j + lo_k, gidx[2]]
+                    s_shm[tidx, j] = valid ? s_shm[tidx, j] : typemin(T)
                 end
             end
 
             # ---------------- soft-max reconstruction -------------------
             in_ms = in_seq_bounds || tidx + lo_q ≤ size(ms,1)
-            m_i   = in_ms ? ms[tidx+lo_q, gidx[1], gidx[2]] : typemax(T)
-            for j in 1:gsz
-                s_shm[tidx,j] = exp(s_shm[tidx,j] - m_i)
+            m_i   = in_ms ? ms[tidx + lo_q, gidx[1], gidx[2]] : typemax(T)
+            @unroll for j in 1:gsz
+                s_shm[tidx, j] = exp(s_shm[tidx, j] - m_i)
             end
 
             # -------------------- dV ------------------------------------
@@ -102,17 +94,18 @@
             @synchronize()
             if in_dv
                 @unroll for i in 1:emb_dim
-                    dv[i, tidx+lo_k, gidx[1], gidx[2]] = d_shm[i,tidx]
+                    dv[i, tidx + lo_k, gidx[1], gidx[2]] = d_shm[i, tidx]
                 end
             end
 
             # -------------------- dS (back into s_shm) -------------------
             sh_load_emb!(d_shm, v, lo_k, in_dv, Val(false))
             @synchronize()
+            # TODO prefetch δ?
             mma!(s_shm, Δ_shm, d_shm, cfg_ds, tidx,
-                 (res, out, x, y)->begin
-                     d_i = if in_seq_bounds || x+lo_q ≤ size(δ,1)
-                         @inbounds δ[x+lo_q, gidx[1], gidx[2]]
+                 (res, out, x, y) -> begin
+                     d_i = if in_seq_bounds || x + lo_q ≤ size(δ, 1)
+                         @inbounds δ[x + lo_q, gidx[1], gidx[2]]
                      else
                          zero(T)
                      end
@@ -121,13 +114,13 @@
             @synchronize()
 
             # -------------------- dpair ----------------------------------
-            if use_pair
+            if !isnothing(pair)
                 row = tidx + lo_q
-                for j in 1:gsz
+                @unroll for j in 1:gsz
                     col = j + lo_k
-                    (in_seq_bounds || col ≤ size(dpair,3)) || break
-                    if (in_seq_bounds || row ≤ size(dpair,2))
-                        @inbounds dpair[gidx[1], row, col, gidx[2]] = s_shm[tidx,j] / scale
+                    (in_seq_bounds || col ≤ size(dpair, 3)) || break
+                    if (in_seq_bounds || row ≤ size(dpair, 2))
+                        dpair[gidx[1], row, col, gidx[2]] = s_shm[tidx, j] / scale
                     end
                 end
             end
@@ -138,19 +131,19 @@
             @synchronize()
             if in_k_ok
                 @unroll for i in 1:emb_dim
-                    dk[i, tidx+lo_k, gidx[1], gidx[2]] = d_shm[i,tidx]
+                    dk[i, tidx + lo_k, gidx[1], gidx[2]] = d_shm[i,tidx]
                 end
             end
 
             # -------------------- dQ ------------------------------------
-            in_dq = in_seq_bounds || tidx + lo_q ≤ size(dq,2)
+            in_dq = in_seq_bounds || tidx + lo_q ≤ size(dq, 2)
             sh_load_emb!(d_shm, dq, lo_q, in_dq, Val(false))
             @synchronize()
             mma!(d_shm, s_shm, k_shm, cfg_dq, tidx, mma_acc_fn)
             @synchronize()
             if in_dq
                 @unroll for i in 1:emb_dim
-                    dq[i, tidx+lo_q, gidx[1], gidx[2]] = d_shm[i,tidx]
+                    dq[i, tidx + lo_q, gidx[1], gidx[2]] = d_shm[i,tidx]
                 end
             end
 
@@ -158,9 +151,6 @@
         end
     end
 end
-
-
-
 
 @kernel unsafe_indices=true cpu=false inbounds=true function _flash_attention_bwd_preprocess!(
     # Output.
@@ -185,28 +175,26 @@ end
     inv_denom = inv(ls[tidx + q_offset, gidx[2], gidx[3]])
     Δ_scaled_v = @view(Δ_scaled[:, tidx + q_offset, gidx[2], gidx[3]])
     Δ_v = @view(Δ[:, tidx + q_offset, gidx[2], gidx[3]])
-    for i in 1:emb_dim
+    @unroll for i in 1:emb_dim
         Δ_scaled_v[i] = Δ_v[i] * inv_denom
     end
 
     # δ = sum(o * do; dims=2) # dims=2 in the (B, H, L, E) format
     o_v = @view(o[:, tidx + q_offset, gidx[2], gidx[3]])
     d = zero(T)
-    for i in 1:emb_dim
+    @unroll for i in 1:emb_dim
         d += Δ_scaled_v[i] * o_v[i]
     end
     δ[tidx + q_offset, gidx[2], gidx[3]] = d
 end
 
-
-
 function ∇flash_attention(
     Δ::AbstractArray{T,4},
     o::AbstractArray{T,4}, ms::AbstractArray{T,3}, ls::AbstractArray{T,3},
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
-    pair::Union{Nothing,AbstractArray{T,4}} = nothing;
+    pair::Maybe{AbstractArray{T,4}} = nothing;
     causal::Bool,
-    kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing,
+    kpad_mask::Maybe{AbstractMatrix{Bool}} = nothing,
 ) where T
     emb_dim, QL, H, B = size(q)
     KL                = size(k, 2)
@@ -217,8 +205,6 @@ function ∇flash_attention(
 
     q_tiles, k_tiles = cld.((QL, KL), gsz)
     in_bounds = QL % gsz == 0 && KL % gsz == 0
-    use_mask  = kpad_mask !== nothing
-    use_pair  = pair !== nothing
     scale     = T(inv(sqrt(emb_dim)))
 
     # ---------------- preprocess -----------------------------------------
@@ -232,8 +218,9 @@ function ∇flash_attention(
     dq = KA.zeros(kab, T, size(q))
     dk = KA.zeros(kab, T, size(k))
     dv = KA.zeros(kab, T, size(v))
-    dp = use_pair ? KA.zeros(kab, T, size(pair)) :
-                    KA.zeros(kab, T, (1,1,1,1))   # harmless dummy
+    dp = isnothing(pair) ?
+        KA.allocate(kab, T, (0,0,0,0)) :   # harmless dummy
+        KA.zeros(kab, T, size(pair))
 
     # ---------------- MMA configs (unchanged) ----------------------------
     BM,BK,BN = gsz, emb_dim, gsz
@@ -254,17 +241,17 @@ function ∇flash_attention(
     cfg_ds   = FATileConfig{BM,BK,BN,TM,TN,true,false,false}
 
     # ---------------- launch kernel --------------------------------------
-    threads = (gsz,1);  ndrange = (gsz*H, B)
+    threads = (gsz, 1)
+    ndrange = (gsz * H, B)
     _flash_attention_bwd!(kab, threads)(
         cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
         dq, dk, dv, dp,
         Δ_scaled, δ,
         o, ms,
-        q, k, v, (use_pair ? pair : dp),              # pass real or dummy
-        scale, kpad_mask,
-        Val(emb_dim), Val(in_bounds), Val(causal), Val(use_mask), Val(use_pair);
+        q, k, v, scale,
+        pair, kpad_mask,
+        Val(emb_dim), Val(in_bounds), Val(causal);
         ndrange)
 
-    return dq, dk, dv, (use_pair ? dp : nothing)
+    return dq, dk, dv, (isnothing(pair) ? nothing : dp)
 end
-
