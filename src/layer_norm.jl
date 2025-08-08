@@ -210,11 +210,11 @@ function layer_norm(x, w, b; ϵ::Float32 = 1f-6)
     return y[1]
 end
 
-function ChainRulesCore.rrule(::typeof(_layer_norm), x, w, b; ϵ::Float32 = 1f-6)
+function CRC.rrule(::typeof(_layer_norm), x, w, b; ϵ::Float32 = 1f-6)
     y, μ, Σ = _layer_norm(x, w, b; ϵ)
     function _pullback(Δ)
-        dx, dw, db = ∇layer_norm(ChainRulesCore.unthunk(Δ), μ, Σ, x, w, b)
-        return ChainRulesCore.NoTangent(), dx, dw, db
+        dx, dw, db = ∇layer_norm(CRC.unthunk(Δ), μ, Σ, x, w, b)
+        return CRC.NoTangent(), dx, dw, db
     end
     return y, _pullback
 end

@@ -91,10 +91,8 @@ end
 llama_rope(q, k; cos, sin) = _llama_rope(q, k, cos, sin; bwd=false)
 ∇llama_rope(dq, dk; cos, sin) = _llama_rope(dq, dk, cos, sin; bwd=true)
 
-function ChainRulesCore.rrule(::typeof(llama_rope), q, k; cos, sin)
+function CRC.rrule(::typeof(llama_rope), q, k; cos, sin)
     q, k = llama_rope(q, k; cos, sin)
-    _pullback(Δ) = (
-        ChainRulesCore.NoTangent(),
-        ∇llama_rope(ChainRulesCore.unthunk.(Δ)...; cos, sin)...)
+    _pullback(Δ) = (CRC.NoTangent(), ∇llama_rope(CRC.unthunk.(Δ)...; cos, sin)...)
     return (q, k), _pullback
 end
