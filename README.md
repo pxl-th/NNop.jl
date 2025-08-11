@@ -98,3 +98,4 @@ q = Adapt.adapt(kab, ones(Float32, (E, L, QH, B)))
 k = Adapt.adapt(kab, ones(Float32, (E, L, KH, B)))
 q, k = NNop.llama_rope(q, k; cos, sin)
 ```
+
