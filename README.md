@@ -10,12 +10,13 @@
 [buildkite-img-cuda]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?branch=master&step=CUDA%20-%20Julia%201.11
 [buildkite-url]: https://buildkite.com/julialang/nnop-dot-jl
 
-Kernels (with [ChainRules.jl](https://github.com/JuliaDiff/ChainRules.jl) integration):
+Fused kernels (with [ChainRules.jl](https://github.com/JuliaDiff/ChainRules.jl) integration):
 
 - [Flash Attention](#flash-attention)
-- [Fused Softmax](#fused-softmax)
-- [Fused RMS Norm](#fused-rms-norm)
-- [Fused Layer Norm](#fused-layer-norm)
+- [Softmax](#softmax)
+- [RMS Norm](#rms-norm)
+- [Layer Norm](#layer-norm)
+- [Llama RoPE](#llama-rope)
 
 ## Benchmarking
 
@@ -39,15 +40,6 @@ o = NNop.flash_attention(q, k, v; causal)
 end
 ```
 
-||Naїve attention|Flash Attention|
-|-|-|-|
-|FWD|||
-|Execution time|60.987 ms|18.380 ms|
-|Peak memory usage|5.044 GiB|16.500 MiB|
-|FWD + BWD|||
-|Execution time|1.154 s|306.960 ms|
-|Peak memory usage|19.164 GiB|80.813 MiB|
-
 ### Features:
 
 - Forward & backward passes.
@@ -56,7 +48,7 @@ end
 - Variable sequence length.
 - Causal masking.
 
-## Fused Softmax
+## Softmax
 
 Implementation of [Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867).
 
@@ -65,12 +57,7 @@ x = ROCArray(rand(Float32, 8192, 1024))
 y = NNop.online_softmax(x)
 ```
 
-||Naїve Softmax|Online Softmax|
-|-|-|-|
-|Execution time|745.123 μs|61.600 μs|
-|Peak memory usage|64.258 MiB|32.000 MiB|
-
-## Fused RMS Norm
+## RMS Norm
 
 ```julia
 x = ROCArray(rand(Float32, 1024, 1024))
@@ -81,17 +68,7 @@ y = NNop.rms_norm(x, w)
 end
 ```
 
-||Naїve RMS Norm|Fused RMS Norm|
-|-|-|-|
-|FWD|||
-|Execution time|171.124 μs|48.432 μs|
-|Peak memory usage|8.004 MiB|4.004 MiB|
-|FWD + BWD|||
-|Execution time|902.919 μs|241.838 μs|
-|Peak memory usage|44.043 MiB|13.008 MiB|
-
-
-## Fused Layer Norm
+## Layer Norm
 
 ```julia
 x = ROCArray(rand(Float32, 1024, 1024))
@@ -103,11 +80,21 @@ y = NNop.layer_norm(x, w)
 end
 ```
 
-||Naїve Layer Norm|Fused Layer Norm|
-|-|-|-|
-|FWD|||
-|Execution time|188.392 μs|48.175 μs|
-|Peak memory usage|4.008 MiB|4.004 MiB|
-|FWD + BWD|||
-|Execution time|1.150 ms|293.969 μs|
-|Peak memory usage|52.055 MiB|14.016 MiB|
+## Llama RoPE
+
+```julia
+E, L, B = 16, 1024, 1
+QH, KH = 16, 16
+
+emb = NNop.LlamaRotaryEmbedding(E)
+position_ids = reshape(collect(0f0:Float32(L) - 1f0), :, 1)
+position_ids = repeat(position_ids; inner=(1, B))
+
+cos, sin = emb(position_ids)
+cos = Adapt.adapt(kab, cos)
+sin = Adapt.adapt(kab, sin)
+
+q = Adapt.adapt(kab, ones(Float32, (E, L, QH, B)))
+k = Adapt.adapt(kab, ones(Float32, (E, L, KH, B)))
+q, k = NNop.llama_rope(q, k; cos, sin)
+```
