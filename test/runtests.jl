@@ -9,6 +9,7 @@ import Pkg
 
 #ENV["NNOP_TEST_AMDGPU"] = true
 #ENV["NNOP_TEST_CUDA"] = true
+#ENV["NNOP_TEST_ONEAPI"] = true
 
 if get(ENV, "NNOP_TEST_AMDGPU", "false") == "true"
     Pkg.add("AMDGPU")
@@ -18,6 +19,10 @@ elseif get(ENV, "NNOP_TEST_CUDA", "false") == "true"
     Pkg.add("CUDA")
     using CUDA
     kab = CUDABackend()
+elseif get(ENV, "NNOP_TEST_ONEAPI", "false") == "true"
+    Pkg.add("oneAPI")
+    using oneAPI
+    kab = oneAPIBackend()
 else
     error("No GPU backend is set.")
 end
