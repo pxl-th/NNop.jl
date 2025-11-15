@@ -5,6 +5,7 @@ using Statistics
 
 import Adapt
 import Zygote
+import Einops
 import Pkg
 
 #ENV["NNOP_TEST_AMDGPU"] = true
@@ -35,6 +36,16 @@ function att_padding_mask(kpadmask, other_dim; T = Float32)
 end
 
 function naive_attention(q, k, v, pair = nothing; causal::Bool, kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
+    # Support grouped-query attention: expand KV heads to match query heads
+    QH, KVH = size(q, 3), size(k, 3)
+    if QH != KVH
+        @assert QH % KVH == 0 "Number of query heads must be divisible by number of KV heads"
+        num_q_per_kv = QH ÷ KVH
+        # Expand K and V by repeating each KV head num_q_per_kv times
+        k = repeat(k, Einops.einops"d l h ... -> d l (num_q_per_kv h) ..."; num_q_per_kv)
+        v = repeat(v, Einops.einops"d l h ... -> d l (num_q_per_kv h) ..."; num_q_per_kv)
+    end
+    
     kt = permutedims(k, (2, 1, 3, 4))
     a = (kt ⊠ q) .* inv(sqrt(size(q, 1)))
     if causal
@@ -190,6 +201,41 @@ end
         @test isapprox(∇n[1], ∇f[1]; atol=1f-6, rtol=1f-6)
         @test isapprox(∇n[2], ∇f[2]; atol=1f-6, rtol=1f-6)
         @test isapprox(∇n[3], ∇f[3]; atol=1f-6, rtol=1f-6)
+    end
+
+    @testset "Grouped-Query Attention: QH=$QH, KVH=$KVH, causal=$causal, T=$T, E=$E, QL=$QL" for QH in (
+        2, 4, 8,
+    ), KVH in (
+        1, 2,
+    ), causal in (
+        false, true,
+    ), T in (
+        Float32,
+    ), E in (
+        32, 64,
+    ), QL in (
+        256, 512,
+    )
+        QH % KVH == 0 || continue  # Skip invalid combinations
+        QH == KVH && continue  # Skip regular MHA (already tested)
+        
+        KL = QL
+        B = 2
+        
+        q = Adapt.adapt(kab, randn(T, E, QL, QH, B))
+        k = Adapt.adapt(kab, randn(T, E, KL, KVH, B))
+        v = Adapt.adapt(kab, randn(T, E, KL, KVH, B))
+        
+        o1, ∇1 = Zygote.withgradient(q, k, v) do q, k, v
+            sum(naive_attention(q, k, v; causal, kpad_mask=nothing))
+        end
+        o2, ∇2 = Zygote.withgradient(q, k, v) do q, k, v
+            sum(NNop.flash_attention(q, k, v; causal, kpad_mask=nothing))
+        end
+        @test isapprox(o1, o2; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[1], ∇2[1]; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[2], ∇2[2]; atol=1e-3, rtol=1e-3)
+        @test isapprox(∇1[3], ∇2[3]; atol=1e-3, rtol=1e-3)
     end
 
     @testset "Llama RoPE: L=$L, QH=$QH, KH=$KH" for L in (

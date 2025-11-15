@@ -7,8 +7,8 @@
     scale::T,
     pair::Maybe{AbstractArray{T, 4}},
     kpad_mask::Maybe{AbstractMatrix{Bool}},
-    ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal},
-) where {T, emb_dim, in_seq_bounds, causal}
+    ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal}, ::Val{num_q_per_kv},
+) where {T, emb_dim, in_seq_bounds, causal, num_q_per_kv}
     gsz = @groupsize()[1]
     kv_seq_tiles = cld(size(k, 2), gsz)
 
@@ -22,16 +22,20 @@
     gidx = @index(Group, NTuple)
     q_offset = (gidx[1] - 1) * gsz
     in_q_seq_bounds = in_seq_bounds || q_offset + tidx ≤ size(q, 2)
+    
+    # Map query head to corresponding KV head (for grouped-query attention)
+    q_head_idx = gidx[2]
+    kv_head_idx = cld(q_head_idx, num_q_per_kv)
 
-    @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}) where tr
+    @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}, head_idx) where tr
         @unroll for i in 1:emb_dim
             x, y = tr ? (tidx, i) : (i, tidx)
-            @inbounds dest[x, y] = mask ? src[i, tidx + offset, gidx[2], gidx[3]] : zero(T)
+            @inbounds dest[x, y] = mask ? src[i, tidx + offset, head_idx, gidx[3]] : zero(T)
         end
     end
 
     # Load `q` --------------------------------------------------------------
-    sh_load_emb!(q_shm, q, q_offset, in_q_seq_bounds, Val{true}())
+    sh_load_emb!(q_shm, q, q_offset, in_q_seq_bounds, Val{true}(), q_head_idx)
     @unroll for i in 1:emb_dim
         o_shm[i, tidx] = zero(T)
     end
@@ -44,7 +48,7 @@
 
     for _ in 1:end_iter
         in_k_seq_bounds = in_seq_bounds || k_offset + tidx ≤ size(k, 2)
-        sh_load_emb!(k_shm, k, k_offset, in_k_seq_bounds, Val{false}())
+        sh_load_emb!(k_shm, k, k_offset, in_k_seq_bounds, Val{false}(), kv_head_idx)
         @synchronize()
 
         # ---- scaled Q · Kᵀ ------------------------------------------------
@@ -107,7 +111,7 @@
         end
 
         # ---- P · V --------------------------------------------------------
-        sh_load_emb!(k_shm, v, k_offset, in_k_seq_bounds, Val{false}())
+        sh_load_emb!(k_shm, v, k_offset, in_k_seq_bounds, Val{false}(), kv_head_idx)
         @synchronize()
         mma!(o_shm, s_shm, k_shm, cfg_out, tidx, mma_acc_fn)
         @synchronize()
@@ -120,10 +124,10 @@
     # ---- write-back -------------------------------------------------------
     if in_seq_bounds || in_q_seq_bounds
         @unroll for i in 1:emb_dim
-            o[i, tidx + q_offset, gidx[2], gidx[3]] = o_shm[i, tidx]
+            o[i, tidx + q_offset, q_head_idx, gidx[3]] = o_shm[i, tidx]
         end
-        ms[tidx + q_offset, gidx[2], gidx[3]] = m_i
-        ls[tidx + q_offset, gidx[2], gidx[3]] = l_i
+        ms[tidx + q_offset, q_head_idx, gidx[3]] = m_i
+        ls[tidx + q_offset, q_head_idx, gidx[3]] = l_i
     end
 end
 
@@ -134,10 +138,16 @@ function _flash_attention(
     pair::Union{Nothing,AbstractArray{T,4}} = nothing;
     causal::Bool, kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing,
 ) where T
-    emb_dim, QL, H, B = size(q)
-    KL = size(k, 2)
+    emb_dim, QL, QH, B = size(q)
+    KL, KVH = size(k, 2), size(k, 3)
     @assert size(k) == size(v)
+    @assert size(k, 1) == emb_dim
+    @assert size(k, 4) == B
     ispow2(emb_dim) || error("Only power-of-2 embedding dims are supported.")
+    
+    # Validate grouped-query attention: num_q_heads must be divisible by num_kv_heads
+    @assert QH % KVH == 0 "Number of query heads ($QH) must be divisible by number of KV heads ($KVH)"
+    num_q_per_kv = QH ÷ KVH
 
     kab          = get_backend(q)
     target_shmem = shared_memory(kab, KA.device(kab))
@@ -145,7 +155,7 @@ function _flash_attention(
 
     q_seq_tiles, kv_seq_tiles = cld.((QL, KL), gsz)
     threads   = (gsz, 1, 1)
-    ndrange   = (gsz * q_seq_tiles, H, B)
+    ndrange   = (gsz * q_seq_tiles, QH, B)
     in_bounds = QL % gsz == 0 && KL % gsz == 0
     scale     = T(inv(sqrt(emb_dim)))
 
@@ -160,13 +170,13 @@ function _flash_attention(
 
     # ----------------------------------------------------------------------
     o  = similar(q)
-    ms = KA.allocate(kab, eltype(o), (QL,H,B))
-    ls = KA.allocate(kab, eltype(o), (QL,H,B))
+    ms = KA.allocate(kab, eltype(o), (QL,QH,B))
+    ls = KA.allocate(kab, eltype(o), (QL,QH,B))
 
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
         o, ms, ls, q, k, v, scale, pair, kpad_mask,
-        Val(emb_dim), Val(in_bounds), Val(causal);   # flags
+        Val(emb_dim), Val(in_bounds), Val(causal), Val(num_q_per_kv);   # flags
         ndrange)
 
     return o, ms, ls
