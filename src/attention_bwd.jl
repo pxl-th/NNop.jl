@@ -8,6 +8,8 @@
     scale::T,
     pair::Maybe{AbstractArray{T,4}}, # ← pair tensor
     kpad_mask::Maybe{AbstractMatrix{Bool}},
+    q_doc_ids::Maybe{AbstractMatrix{Int32}},
+    k_doc_ids::Maybe{AbstractMatrix{Int32}},
     ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal},
 ) where {T, emb_dim, in_seq_bounds, causal}
     gsz = @groupsize()[1]
@@ -20,9 +22,15 @@
     s_shm = @localmem T       (gsz, gsz)   # scores / dS
     Δ_shm = @localmem T       (emb_dim, gsz)
     d_shm = @localmem T       (emb_dim, gsz)
+    q_doc_shm = @localmem Int32 (gsz,)
+    k_doc_shm = @localmem Int32 (gsz,)
+    q_doc_range_shm = @localmem Int32 (2,)
+    k_doc_range_shm = @localmem Int32 (2,)
 
     tidx = @index(Local)
     gidx = @index(Group, NTuple)          # (head, batch) in this kernel
+
+    doc_mode = !isnothing(q_doc_ids) && !isnothing(k_doc_ids)
 
     @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}) where tr
         @unroll for i in 1:emb_dim
@@ -38,7 +46,28 @@
 
         in_k_ok = in_seq_bounds || tidx + lo_k ≤ size(k,2)
         sh_load_emb!(k_shm, k, lo_k, in_k_ok, Val(false))
+        if doc_mode
+            k_pos = lo_k + tidx
+            in_k_doc_bounds = in_seq_bounds || k_pos ≤ size(k_doc_ids, 1)
+            k_doc_shm[tidx] = in_k_doc_bounds ? k_doc_ids[k_pos, gidx[2]] : Int32(0)
+        end
         @synchronize()
+
+        if doc_mode
+            if tidx == 1
+                dk_min = typemax(Int32)
+                dk_max = typemin(Int32)
+                @inbounds @unroll for j in 1:gsz
+                    doc = k_doc_shm[j]
+                    doc == 0 && continue
+                    dk_min = min(dk_min, doc)
+                    dk_max = max(dk_max, doc)
+                end
+                k_doc_range_shm[1] = dk_min
+                k_doc_range_shm[2] = dk_max
+            end
+            @synchronize()
+        end
 
         start_m = causal ? start_n : 1                # iterate query-tiles
         for sm in start_m:q_seq_tiles
@@ -48,7 +77,28 @@
             in_q_ok = in_seq_bounds || tidx + q_offset ≤ size(q,2)
             sh_load_emb!(Δ_shm, Δ, q_offset, in_q_ok, Val(false))
             sh_load_emb!(q_shm, q, q_offset, in_q_ok, Val(true))
+            if doc_mode
+                q_pos = q_offset + tidx
+                in_q_doc_bounds = in_seq_bounds || q_pos ≤ size(q_doc_ids, 1)
+                q_doc_shm[tidx] = in_q_doc_bounds ? q_doc_ids[q_pos, gidx[2]] : Int32(0)
+            end
             @synchronize()
+
+            if doc_mode
+                if tidx == 1
+                    dq_min = typemax(Int32)
+                    dq_max = typemin(Int32)
+                    @inbounds @unroll for j in 1:gsz
+                        doc = q_doc_shm[j]
+                        doc == 0 && continue
+                        dq_min = min(dq_min, doc)
+                        dq_max = max(dq_max, doc)
+                    end
+                    q_doc_range_shm[1] = dq_min
+                    q_doc_range_shm[2] = dq_max
+                end
+                @synchronize()
+            end
 
             # ------------- recompute raw scores -------------------------
             mma!(s_shm, q_shm, k_shm, cfg, tidx,
@@ -76,6 +126,13 @@
                     (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
                     valid = kpad_mask[j + lo_k, gidx[2]]
                     s_shm[tidx, j] = valid ? s_shm[tidx, j] : typemin(T)
+                end
+            end
+            if doc_mode
+                @unroll for j in 1:gsz
+                    (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
+                    same_doc = q_doc_shm[tidx] != 0 && q_doc_shm[tidx] == k_doc_shm[j]
+                    s_shm[tidx, j] = same_doc ? s_shm[tidx, j] : typemin(T)
                 end
             end
 
@@ -195,6 +252,8 @@ function ∇flash_attention(
     pair::Maybe{AbstractArray{T,4}} = nothing;
     causal::Bool,
     kpad_mask::Maybe{AbstractMatrix{Bool}} = nothing,
+    q_lengths=nothing,
+    k_lengths=nothing,
 ) where T
     emb_dim, QL, H, B = size(q)
     KL                = size(k, 2)
@@ -221,6 +280,23 @@ function ∇flash_attention(
     dp = isnothing(pair) ?
         KA.allocate(kab, T, (0,0,0,0)) :   # harmless dummy
         KA.zeros(kab, T, size(pair))
+
+    q_doc_ids = nothing
+    k_doc_ids = nothing
+    if q_lengths !== nothing || k_lengths !== nothing
+        (q_lengths === nothing || k_lengths === nothing) &&
+            error("Both q_lengths and k_lengths must be provided together.")
+        @assert size(q_lengths, 2) == B
+        @assert size(k_lengths, 2) == B
+        q_doc_ids = build_doc_ids(kab, q_lengths, QL, B)
+        k_doc_ids = build_doc_ids(kab, k_lengths, KL, B)
+        if causal
+            size(q_lengths) == size(k_lengths) ||
+                error("For causal attention, q_lengths and k_lengths must match shapes.")
+            all(q_lengths .== k_lengths) ||
+                error("For causal attention, q_lengths and k_lengths must be equal.")
+        end
+    end
 
     # ---------------- MMA configs (unchanged) ----------------------------
     BM,BK,BN = gsz, emb_dim, gsz
@@ -249,7 +325,7 @@ function ∇flash_attention(
         Δ_scaled, δ,
         o, ms,
         q, k, v, scale,
-        pair, kpad_mask,
+        pair, kpad_mask, q_doc_ids, k_doc_ids,
         Val(emb_dim), Val(in_bounds), Val(causal);
         ndrange)
 
