@@ -39,6 +39,29 @@
         end
     end
 
+    @inline function doc_tile_range!(doc_range_shm, doc_shm)
+        if tidx == 1
+            dmin = typemax(Int32)
+            dmax = typemin(Int32)
+            @inbounds @unroll for j in 1:gsz
+                doc = doc_shm[j]
+                doc == 0 && continue
+                dmin = min(dmin, doc)
+                dmax = max(dmax, doc)
+            end
+            doc_range_shm[1] = dmin
+            doc_range_shm[2] = dmax
+        end
+    end
+
+    @inline function apply_doc_mask!(s_shm, q_doc_shm, k_doc_shm, lo_k)
+        @unroll for j in 1:gsz
+            (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
+            same_doc = q_doc_shm[tidx] != 0 && q_doc_shm[tidx] == k_doc_shm[j]
+            s_shm[tidx, j] = same_doc ? s_shm[tidx, j] : typemin(T)
+        end
+    end
+
     # --------------------------------------------------------------- 2-nested
     for start_n in 1:kv_seq_tiles                     # iterate key-tiles
         lo_k     = (start_n - 1) * gsz                # column offset
@@ -54,18 +77,7 @@
         @synchronize()
 
         if doc_mode
-            if tidx == 1
-                dk_min = typemax(Int32)
-                dk_max = typemin(Int32)
-                @inbounds @unroll for j in 1:gsz
-                    doc = k_doc_shm[j]
-                    doc == 0 && continue
-                    dk_min = min(dk_min, doc)
-                    dk_max = max(dk_max, doc)
-                end
-                k_doc_range_shm[1] = dk_min
-                k_doc_range_shm[2] = dk_max
-            end
+            doc_tile_range!(k_doc_range_shm, k_doc_shm)
             @synchronize()
         end
 
@@ -85,18 +97,7 @@
             @synchronize()
 
             if doc_mode
-                if tidx == 1
-                    dq_min = typemax(Int32)
-                    dq_max = typemin(Int32)
-                    @inbounds @unroll for j in 1:gsz
-                        doc = q_doc_shm[j]
-                        doc == 0 && continue
-                        dq_min = min(dq_min, doc)
-                        dq_max = max(dq_max, doc)
-                    end
-                    q_doc_range_shm[1] = dq_min
-                    q_doc_range_shm[2] = dq_max
-                end
+                doc_tile_range!(q_doc_range_shm, q_doc_shm)
                 @synchronize()
             end
 
@@ -129,11 +130,7 @@
                 end
             end
             if doc_mode
-                @unroll for j in 1:gsz
-                    (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
-                    same_doc = q_doc_shm[tidx] != 0 && q_doc_shm[tidx] == k_doc_shm[j]
-                    s_shm[tidx, j] = same_doc ? s_shm[tidx, j] : typemin(T)
-                end
+                apply_doc_mask!(s_shm, q_doc_shm, k_doc_shm, lo_k)
             end
 
             # ---------------- soft-max reconstruction -------------------

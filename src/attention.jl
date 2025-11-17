@@ -6,7 +6,6 @@
     q::AbstractArray{T, 4}, k::AbstractArray{T, 4}, v::AbstractArray{T, 4},
     scale::T,
     pair::Maybe{AbstractArray{T, 4}},
-    kpad_mask::Maybe{AbstractMatrix{Bool}},
     q_doc_ids::Maybe{AbstractMatrix{Int32}},
     k_doc_ids::Maybe{AbstractMatrix{Int32}},
     k_tile_start_doc::Maybe{AbstractMatrix{Int32}},
@@ -39,6 +38,29 @@
         end
     end
 
+    @inline function doc_tile_range!(doc_range_shm, doc_shm)
+        if tidx == 1
+            dmin = typemax(Int32)
+            dmax = typemin(Int32)
+            @inbounds @unroll for i in 1:gsz
+                doc = doc_shm[i]
+                doc == 0 && continue
+                dmin = min(dmin, doc)
+                dmax = max(dmax, doc)
+            end
+            doc_range_shm[1] = dmin
+            doc_range_shm[2] = dmax
+        end
+    end
+
+    @inline function apply_doc_mask!(s_shm, q_doc_shm, k_doc_shm, k_offset)
+        @unroll for i in 1:gsz
+            (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
+            same_doc = q_doc_shm[tidx] != 0 && q_doc_shm[tidx] == k_doc_shm[i]
+            s_shm[tidx, i] = same_doc ? s_shm[tidx, i] : typemin(T)
+        end
+    end
+
     # Load `q` --------------------------------------------------------------
     sh_load_emb!(q_shm, q, q_offset, in_q_seq_bounds, Val{true}())
     if doc_mode
@@ -52,18 +74,7 @@
     @synchronize()
 
     if doc_mode
-        if tidx == 1
-            dq_min = typemax(Int32)
-            dq_max = typemin(Int32)
-            @inbounds @unroll for i in 1:gsz
-                doc = q_doc_shm[i]
-                doc == 0 && continue
-                dq_min = min(dq_min, doc)
-                dq_max = max(dq_max, doc)
-            end
-            q_doc_range_shm[1] = dq_min
-            q_doc_range_shm[2] = dq_max
-        end
+        doc_tile_range!(q_doc_range_shm, q_doc_shm)
         @synchronize()
     end
 
@@ -113,18 +124,7 @@
         @synchronize()
 
         if doc_mode
-            if tidx == 1
-                dk_min = typemax(Int32)
-                dk_max = typemin(Int32)
-                @inbounds @unroll for i in 1:gsz
-                    doc = k_doc_shm[i]
-                    doc == 0 && continue
-                    dk_min = min(dk_min, doc)
-                    dk_max = max(dk_max, doc)
-                end
-                k_doc_range_shm[1] = dk_min
-                k_doc_range_shm[2] = dk_max
-            end
+            doc_tile_range!(k_doc_range_shm, k_doc_shm)
             @synchronize()
 
             dq_min = q_doc_range_shm[1]
@@ -137,7 +137,6 @@
                 overlap_min = max(dq_min, dk_min)
                 overlap_max = min(dq_max, dk_max)
                 if overlap_min > overlap_max
-                    k_offset += gsz
                     continue
                 end
             end
@@ -163,19 +162,8 @@
                 s_shm[tidx, i] = (tidx + q_offset ≥ i + k_offset) ? s_shm[tidx, i] : typemin(T)
             end
         end
-        if !isnothing(kpad_mask)
-            @unroll for i in 1:gsz
-                (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
-                valid = kpad_mask[k_offset + i, gidx[3]]
-                s_shm[tidx, i] = valid ? s_shm[tidx, i] : typemin(T)
-            end
-        end
         if doc_mode
-            @unroll for i in 1:gsz
-                (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
-                same_doc = q_doc_shm[tidx] != 0 && q_doc_shm[tidx] == k_doc_shm[i]
-                s_shm[tidx, i] = same_doc ? s_shm[tidx, i] : typemin(T)
-            end
+            apply_doc_mask!(s_shm, q_doc_shm, k_doc_shm, k_offset)
         end
 
         # ---- online soft-max ---------------------------------------------
@@ -184,22 +172,41 @@
             m_ij = max(m_ij, s_shm[tidx, i])
         end
 
+        has_valid = m_ij != typemin(T)
+
         l_ij = zero(T)
-        @unroll for i in 1:gsz
-            (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
-            tmp = exp(s_shm[tidx, i] - m_ij)
-            l_ij += tmp
-            s_shm[tidx, i] = tmp
+        if has_valid
+            @unroll for i in 1:gsz
+                (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
+                tmp = exp(s_shm[tidx, i] - m_ij)
+                l_ij += tmp
+                s_shm[tidx, i] = tmp
+            end
+        else
+            @unroll for i in 1:gsz
+                s_shm[tidx, i] = zero(T)
+            end
         end
         @synchronize()
 
-        m_i_new = max(m_i, m_ij)
-        α = exp(m_i - m_i_new)
-        β = exp(m_ij - m_i_new)
-        l_i_new = α * l_i + β * l_ij
+        if has_valid
+            m_i_new = max(m_i, m_ij)
+            α = exp(m_i - m_i_new)
+            β = exp(m_ij - m_i_new)
+            l_i_new = α * l_i + β * l_ij
+        else
+            m_i_new = m_i
+            α = one(T)
+            β = zero(T)
+            l_i_new = l_i
+        end
 
-        p_scale = β / l_i_new
-        o_scale = l_i / l_i_new * α
+        p_scale = zero(T)
+        o_scale = one(T)
+        if l_i_new != zero(T)
+            p_scale = β / l_i_new
+            o_scale = l_i / l_i_new * α
+        end
 
         @unroll for i in 1:gsz
             s_shm[tidx, i] *= p_scale
@@ -235,7 +242,6 @@ function _flash_attention(
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
     pair::Union{Nothing,AbstractArray{T,4}} = nothing;
     causal::Bool,
-    kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing,
     q_lengths=nothing,
     k_lengths=nothing,
 ) where T
@@ -290,7 +296,7 @@ function _flash_attention(
 
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
-        o, ms, ls, q, k, v, scale, pair, kpad_mask,
+        o, ms, ls, q, k, v, scale, pair,
         q_doc_ids, k_doc_ids, k_tile_start_doc, k_tile_end_doc,
         Val(emb_dim), Val(in_bounds), Val(causal);   # flags
         ndrange)
