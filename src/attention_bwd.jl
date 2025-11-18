@@ -7,7 +7,6 @@
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
     scale::T,
     pair::Maybe{AbstractArray{T,4}}, # ← pair tensor
-    kpad_mask::Maybe{AbstractMatrix{Bool}},
     q_doc_ids::Maybe{AbstractMatrix{Int32}},
     k_doc_ids::Maybe{AbstractMatrix{Int32}},
     ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal},
@@ -122,13 +121,6 @@
                     s_shm[tidx, j] = tidx + q_offset ≥ j + lo_k ? s_shm[tidx, j] : typemin(T)
                 end
             end
-            if !isnothing(kpad_mask)
-                @unroll for j in 1:gsz
-                    (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
-                    valid = kpad_mask[j + lo_k, gidx[2]]
-                    s_shm[tidx, j] = valid ? s_shm[tidx, j] : typemin(T)
-                end
-            end
             if doc_mode
                 apply_doc_mask!(s_shm, q_doc_shm, k_doc_shm, lo_k)
             end
@@ -226,11 +218,18 @@ end
     in_q_seq_bounds || return
 
     # Δ = Δ / ls
-    inv_denom = inv(ls[tidx + q_offset, gidx[2], gidx[3]])
+    denom = ls[tidx + q_offset, gidx[2], gidx[3]]
     Δ_scaled_v = @view(Δ_scaled[:, tidx + q_offset, gidx[2], gidx[3]])
     Δ_v = @view(Δ[:, tidx + q_offset, gidx[2], gidx[3]])
-    @unroll for i in 1:emb_dim
-        Δ_scaled_v[i] = Δ_v[i] * inv_denom
+    if denom == zero(T)
+        @unroll for i in 1:emb_dim
+            Δ_scaled_v[i] = zero(T)
+        end
+    else
+        inv_denom = inv(denom)
+        @unroll for i in 1:emb_dim
+            Δ_scaled_v[i] = Δ_v[i] * inv_denom
+        end
     end
 
     # δ = sum(o * do; dims=2) # dims=2 in the (B, H, L, E) format
@@ -248,7 +247,6 @@ function ∇flash_attention(
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
     pair::Maybe{AbstractArray{T,4}} = nothing;
     causal::Bool,
-    kpad_mask::Maybe{AbstractMatrix{Bool}} = nothing,
     q_lengths=nothing,
     k_lengths=nothing,
 ) where T
@@ -322,7 +320,7 @@ function ∇flash_attention(
         Δ_scaled, δ,
         o, ms,
         q, k, v, scale,
-        pair, kpad_mask, q_doc_ids, k_doc_ids,
+        pair, q_doc_ids, k_doc_ids,
         Val(emb_dim), Val(in_bounds), Val(causal);
         ndrange)
 

@@ -169,6 +169,7 @@
         # ---- online soft-max ---------------------------------------------
         m_ij = typemin(T)
         @unroll for i in 1:gsz
+            (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
             m_ij = max(m_ij, s_shm[tidx, i])
         end
 

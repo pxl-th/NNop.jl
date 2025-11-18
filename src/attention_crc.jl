@@ -5,7 +5,6 @@ function flash_attention(
     q, k, v,
     pair::Maybe{AbstractArray{<:Real, 4}} = nothing;
     causal::Bool,
-    kpad_mask::Maybe{AbstractMatrix{Bool}} = nothing,
     lengths=nothing,
     q_lengths=nothing,
     k_lengths=nothing,
@@ -19,7 +18,6 @@ function flash_attention(
 
     o = _flash_attention(q, k, v, pair;
         causal,
-        kpad_mask=kpad_mask,
         q_lengths=q_lengths,
         k_lengths=k_lengths)
     within_gradient(q) && return o
@@ -31,7 +29,6 @@ function CRC.rrule(::typeof(_flash_attention),
     q, k, v,
     pair::Maybe{AbstractArray{<:Real, 4}} = nothing;
     causal::Bool,
-    kpad_mask::Maybe{AbstractMatrix{Bool}} = nothing,
     lengths=nothing,
     q_lengths=nothing,
     k_lengths=nothing,
@@ -45,7 +42,6 @@ function CRC.rrule(::typeof(_flash_attention),
 
     o, ms, ls = _flash_attention(q, k, v, pair;
         causal,
-        kpad_mask=kpad_mask,
         q_lengths=q_lengths,
         k_lengths=k_lengths)
 
@@ -54,7 +50,6 @@ function CRC.rrule(::typeof(_flash_attention),
             CRC.unthunk(Δ),
             o, ms, ls, q, k, v, pair;
             causal=causal,
-            kpad_mask=kpad_mask,
             q_lengths=q_lengths,
             k_lengths=k_lengths)
         return CRC.NoTangent(), dq, dk, dv, dpair
