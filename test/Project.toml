@@ -1,5 +1,6 @@
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Einops = "e3ce28c8-8bfb-4704-8add-e3e7f14b55c9"
 NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
 NNop = "eeb6ee5c-f953-4f60-8482-00c4fb7bc198"

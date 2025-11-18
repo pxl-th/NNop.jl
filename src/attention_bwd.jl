@@ -9,8 +9,8 @@
     pair::Maybe{AbstractArray{T,4}}, # ← pair tensor
     q_doc_ids::Maybe{AbstractMatrix{Int32}},
     k_doc_ids::Maybe{AbstractMatrix{Int32}},
-    ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal},
-) where {T, emb_dim, in_seq_bounds, causal}
+    ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal}, ::Val{num_q_per_kv},
+) where {T, emb_dim, in_seq_bounds, causal, num_q_per_kv}
     gsz = @groupsize()[1]
     q_seq_tiles = cld(size(q, 2), gsz)
     kv_seq_tiles = cld(size(k, 2), gsz)
@@ -29,12 +29,15 @@
     tidx = @index(Local)
     gidx = @index(Group, NTuple)          # (head, batch) in this kernel
 
+    q_head_idx = gidx[1]
+    kv_head_idx = cld(q_head_idx, num_q_per_kv)
+
     doc_mode = !isnothing(q_doc_ids) && !isnothing(k_doc_ids)
 
-    @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}) where tr
+    @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}, head_idx) where tr
         @unroll for i in 1:emb_dim
             x, y = tr ? (tidx, i) : (i, tidx)
-            @inbounds dest[x,y] = mask ? src[i, tidx+offset, gidx[1], gidx[2]] : zero(T)
+            @inbounds dest[x,y] = mask ? src[i, tidx+offset, head_idx, gidx[2]] : zero(T)
         end
     end
 
@@ -67,7 +70,7 @@
         q_offset = causal ? lo_k : 0                  # starting query row
 
         in_k_ok = in_seq_bounds || tidx + lo_k ≤ size(k,2)
-        sh_load_emb!(k_shm, k, lo_k, in_k_ok, Val(false))
+        sh_load_emb!(k_shm, k, lo_k, in_k_ok, Val(false), kv_head_idx)
         if doc_mode
             k_pos = lo_k + tidx
             in_k_doc_bounds = in_seq_bounds || k_pos ≤ size(k_doc_ids, 1)
@@ -86,8 +89,8 @@
 
             # ------------- load Δ and Q ---------------------------------
             in_q_ok = in_seq_bounds || tidx + q_offset ≤ size(q,2)
-            sh_load_emb!(Δ_shm, Δ, q_offset, in_q_ok, Val(false))
-            sh_load_emb!(q_shm, q, q_offset, in_q_ok, Val(true))
+            sh_load_emb!(Δ_shm, Δ, q_offset, in_q_ok, Val(false), q_head_idx)
+            sh_load_emb!(q_shm, q, q_offset, in_q_ok, Val(true), q_head_idx)
             if doc_mode
                 q_pos = q_offset + tidx
                 in_q_doc_bounds = in_seq_bounds || q_pos ≤ size(q_doc_ids, 1)
@@ -110,7 +113,7 @@
                 @unroll for j in 1:gsz
                     (in_seq_bounds || lo_k + j ≤ size(pair,3)) || break
                     (in_seq_bounds || q_offset + tidx ≤ size(pair,2)) || break
-                    s_shm[tidx, j] += pair[gidx[1], q_offset + tidx, lo_k + j, gidx[2]]
+                    s_shm[tidx, j] += pair[q_head_idx, q_offset + tidx, lo_k + j, gidx[2]]
                 end
             end
 
@@ -127,31 +130,33 @@
 
             # ---------------- soft-max reconstruction -------------------
             in_ms = in_seq_bounds || tidx + lo_q ≤ size(ms,1)
-            m_i   = in_ms ? ms[tidx + lo_q, gidx[1], gidx[2]] : typemax(T)
+            m_i   = in_ms ? ms[tidx + lo_q, q_head_idx, gidx[2]] : typemax(T)
             @unroll for j in 1:gsz
                 s_shm[tidx, j] = exp(s_shm[tidx, j] - m_i)
             end
 
             # -------------------- dV ------------------------------------
             in_dv = in_seq_bounds || tidx + lo_k ≤ size(dv,2)
-            sh_load_emb!(d_shm, dv, lo_k, in_dv, Val(false))
+            @unroll for i in 1:emb_dim
+                d_shm[i, tidx] = zero(T)
+            end
             @synchronize()
             mma!(d_shm, Δ_shm, s_shm, cfg_dv, tidx, mma_acc_fn)
             @synchronize()
             if in_dv
                 @unroll for i in 1:emb_dim
-                    dv[i, tidx + lo_k, gidx[1], gidx[2]] = d_shm[i, tidx]
+                    KA.@atomic dv[i, tidx + lo_k, kv_head_idx, gidx[2]] += d_shm[i, tidx]
                 end
             end
 
             # -------------------- dS (back into s_shm) -------------------
-            sh_load_emb!(d_shm, v, lo_k, in_dv, Val(false))
+            sh_load_emb!(d_shm, v, lo_k, in_dv, Val(false), kv_head_idx)
             @synchronize()
             # TODO prefetch δ?
             mma!(s_shm, Δ_shm, d_shm, cfg_ds, tidx,
                  (res, out, x, y) -> begin
                      d_i = if in_seq_bounds || x + lo_q ≤ size(δ, 1)
-                         @inbounds δ[x + lo_q, gidx[1], gidx[2]]
+                         @inbounds δ[x + lo_q, q_head_idx, gidx[2]]
                      else
                          zero(T)
                      end
@@ -166,30 +171,32 @@
                     col = j + lo_k
                     (in_seq_bounds || col ≤ size(dpair, 3)) || break
                     if (in_seq_bounds || row ≤ size(dpair, 2))
-                        dpair[gidx[1], row, col, gidx[2]] = s_shm[tidx, j] / scale
+                        dpair[q_head_idx, row, col, gidx[2]] = s_shm[tidx, j] / scale
                     end
                 end
             end
             # -------------------- dK ------------------------------------
-            sh_load_emb!(d_shm, dk, lo_k, in_k_ok, Val(false))
+            @unroll for i in 1:emb_dim
+                d_shm[i, tidx] = zero(T)
+            end
             @synchronize()
             mma!(d_shm, s_shm, q_shm, cfg_dk, tidx, mma_acc_fn)
             @synchronize()
             if in_k_ok
                 @unroll for i in 1:emb_dim
-                    dk[i, tidx + lo_k, gidx[1], gidx[2]] = d_shm[i,tidx]
+                    KA.@atomic dk[i, tidx + lo_k, kv_head_idx, gidx[2]] += d_shm[i,tidx]
                 end
             end
 
             # -------------------- dQ ------------------------------------
             in_dq = in_seq_bounds || tidx + lo_q ≤ size(dq, 2)
-            sh_load_emb!(d_shm, dq, lo_q, in_dq, Val(false))
+            sh_load_emb!(d_shm, dq, lo_q, in_dq, Val(false), q_head_idx)
             @synchronize()
             mma!(d_shm, s_shm, k_shm, cfg_dq, tidx, mma_acc_fn)
             @synchronize()
             if in_dq
                 @unroll for i in 1:emb_dim
-                    dq[i, tidx + lo_q, gidx[1], gidx[2]] = d_shm[i,tidx]
+                    dq[i, tidx + lo_q, q_head_idx, gidx[2]] = d_shm[i,tidx]
                 end
             end
 
@@ -250,8 +257,15 @@ function ∇flash_attention(
     q_lengths=nothing,
     k_lengths=nothing,
 ) where T
-    emb_dim, QL, H, B = size(q)
-    KL                = size(k, 2)
+    emb_dim, QL, QH, B = size(q)
+    KL, KVH            = size(k, 2), size(k, 3)
+
+    @assert size(k) == size(v)
+    @assert size(k, 1) == emb_dim
+    @assert size(k, 4) == B
+
+    @assert QH % KVH == 0 "Number of query heads ($QH) must be divisible by number of KV heads ($KVH)"
+    num_q_per_kv = QH ÷ KVH
 
     kab          = get_backend(q)
     target_shmem = shared_memory(kab, KA.device(kab))
@@ -263,7 +277,7 @@ function ∇flash_attention(
 
     # ---------------- preprocess -----------------------------------------
     Δ_scaled = similar(Δ);  δ = similar(ls)
-    threads  = (gsz,1,1);   ndrange = (gsz*q_tiles, H, B)
+    threads  = (gsz,1,1);   ndrange = (gsz*q_tiles, QH, B)
     _flash_attention_bwd_preprocess!(kab, threads)(
         Δ_scaled, δ, Δ, o, ls,
         Val(emb_dim), Val(in_bounds); ndrange)
@@ -313,7 +327,7 @@ function ∇flash_attention(
 
     # ---------------- launch kernel --------------------------------------
     threads = (gsz, 1)
-    ndrange = (gsz * H, B)
+    ndrange = (gsz * QH, B)
     _flash_attention_bwd!(kab, threads)(
         cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
         dq, dk, dv, dp,
@@ -321,7 +335,7 @@ function ∇flash_attention(
         o, ms,
         q, k, v, scale,
         pair, q_doc_ids, k_doc_ids,
-        Val(emb_dim), Val(in_bounds), Val(causal);
+        Val(emb_dim), Val(in_bounds), Val(causal), Val(num_q_per_kv);
         ndrange)
 
     return dq, dk, dv, (isnothing(pair) ? nothing : dp)
