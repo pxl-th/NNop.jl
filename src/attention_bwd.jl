@@ -131,8 +131,18 @@
             # ---------------- soft-max reconstruction -------------------
             in_ms = in_seq_bounds || tidx + lo_q ≤ size(ms,1)
             m_i   = in_ms ? ms[tidx + lo_q, q_head_idx, gidx[2]] : typemax(T)
-            @unroll for j in 1:gsz
-                s_shm[tidx, j] = exp(s_shm[tidx, j] - m_i)
+            if m_i == typemin(T)
+                # Row had no valid keys in forward pass (all scores masked);
+                # forward stored m_i as typemin(T) and l_i = 0, producing zero output.
+                # Reconstructing softmax as exp(typemin - typemin) would yield NaNs,
+                # so we instead set scores to zero directly.
+                @unroll for j in 1:gsz
+                    s_shm[tidx, j] = zero(T)
+                end
+            else
+                @unroll for j in 1:gsz
+                    s_shm[tidx, j] = exp(s_shm[tidx, j] - m_i)
+                end
             end
 
             # -------------------- dV ------------------------------------
