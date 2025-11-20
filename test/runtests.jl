@@ -109,14 +109,14 @@ end
         255, 256, 511, 512, 1024,
     ), KL in (
         255, 256, 511, 512, 1024,
-    )
+    ), sign in (-1, 1)
         causal && QL != KL && continue
 
         H, B = 2, 3
 
-        q = Adapt.adapt(kab, randn(T, E, QL, H, B))
-        k = Adapt.adapt(kab, randn(T, E, KL, H, B))
-        v = Adapt.adapt(kab, randn(T, E, KL, H, B))
+        q = Adapt.adapt(kab, randn(T, E, QL, H, B)) .* T(sign)
+        k = Adapt.adapt(kab, randn(T, E, KL, H, B)) .* T(sign)
+        v = Adapt.adapt(kab, randn(T, E, KL, H, B)) .* T(sign)
 
         kpad_mask = nothing
         if use_padmask
