@@ -1,4 +1,4 @@
-@testitem "Flash Attention" setup=[TSCore, TSAttention] begin
+@testitem "Causal Flash Attention" setup=[TSCore, TSAttention] begin
 
 import Adapt
 import Zygote
