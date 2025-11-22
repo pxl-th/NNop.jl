@@ -3,8 +3,8 @@ using NNop
 using Test
 using ReTestItems
 
-ENV["NNOP_TEST_AMDGPU"] = true
-#ENV["NNOP_TEST_CUDA"] = true
+# ENV["NNOP_TEST_AMDGPU"] = true
+# ENV["NNOP_TEST_CUDA"] = true
 
 if get(ENV, "NNOP_TEST_AMDGPU", "false") == "true"
     Pkg.add("AMDGPU")

@@ -3,7 +3,7 @@
 import Adapt
 import Zygote
 
-@testset "padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, QL=$QL, KL=$KL" for use_padmask in (
+@testset "causal padmask=$use_padmask, pair=$use_pair, T=$T, E=$E, L=$L" for use_padmask in (
     false, true,
 ), use_pair in (
     false, true,
@@ -11,26 +11,24 @@ import Zygote
     Float32, # TODO more types
 ), E in (
     16, 32, 64, # TODO test on higher if applicable
-), QL in (
-    255, 256, 511, 512, 1024,
-), KL in (
+), L in (
     255, 256, 511, 512, 1024,
 )
-    causal = false
+    causal = true
     H, B = 2, 3
-    q = Adapt.adapt(kab, randn(T, E, QL, H, B))
-    k = Adapt.adapt(kab, randn(T, E, KL, H, B))
-    v = Adapt.adapt(kab, randn(T, E, KL, H, B))
+    q = Adapt.adapt(kab, randn(T, E, L, H, B))
+    k = Adapt.adapt(kab, randn(T, E, L, H, B))
+    v = Adapt.adapt(kab, randn(T, E, L, H, B))
 
     kpad_mask = nothing
     if use_padmask
-        kpad_mask = Adapt.adapt(kab, ones(Bool, KL, B))
+        kpad_mask = Adapt.adapt(kab, ones(Bool, L, B))
         kpad_mask[end-10:end, end] .= false
     end
 
     pair = nothing
     if use_pair
-        pair = Adapt.adapt(kab, randn(T, H, QL, KL, B))
+        pair = Adapt.adapt(kab, randn(T, H, L, L, B))
     end
 
     o1, ∇1 = Zygote.withgradient(q, k, v, pair) do q, k, v, pair
