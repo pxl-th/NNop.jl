@@ -1,5 +1,7 @@
 # NNop.jl
 
+<img src="assets/nnop-logo.svg" width="200"/>
+
 |GPU Backend|CI Status|
 |-|-|
 |[AMDGPU](https://github.com/JuliaGPU/AMDGPU.jl)|[![][buildkite-img-amdgpu]][buildkite-url]|
