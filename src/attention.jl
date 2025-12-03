@@ -21,7 +21,7 @@
     tidx = @index(Local)
     gidx = @index(Group, NTuple)
     q_offset = (gidx[1] - 1) * gsz
-    in_q_seq_bounds = in_seq_bounds || q_offset + tidx ≤ size(q, 2)
+    in_q = in_seq_bounds || q_offset + tidx ≤ size(q, 2)
 
     @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}) where tr
         @unroll for i in 1:emb_dim
@@ -31,7 +31,7 @@
     end
 
     # Load `q` --------------------------------------------------------------
-    sh_load_emb!(q_shm, q, q_offset, in_q_seq_bounds, Val{true}())
+    sh_load_emb!(q_shm, q, q_offset, in_q, Val{true}())
     @unroll for i in 1:emb_dim
         o_shm[i, tidx] = zero(T)
     end
@@ -43,8 +43,8 @@
     end_iter = causal ? gidx[1] : kv_seq_tiles
 
     for _ in 1:end_iter
-        in_k_seq_bounds = in_seq_bounds || k_offset + tidx ≤ size(k, 2)
-        sh_load_emb!(k_shm, k, k_offset, in_k_seq_bounds, Val{false}())
+        in_k = in_seq_bounds || k_offset + tidx ≤ size(k, 2)
+        sh_load_emb!(k_shm, k, k_offset, in_k, Val{false}())
         @synchronize()
 
         # ---- scaled Q · Kᵀ ------------------------------------------------
@@ -54,8 +54,7 @@
         # ---- add pair features -------------------------------------------
         if !isnothing(pair)
             @unroll for i in 1:gsz
-                (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
-                in_q_seq_bounds || break
+                in_seq_bounds || (in_q && k_offset + i ≤ size(k, 2)) || break
                 s_shm[tidx, i] += pair[gidx[2], q_offset + tidx, k_offset + i, gidx[3]]
             end
         end
@@ -107,7 +106,7 @@
         end
 
         # ---- P · V --------------------------------------------------------
-        sh_load_emb!(k_shm, v, k_offset, in_k_seq_bounds, Val{false}())
+        sh_load_emb!(k_shm, v, k_offset, in_k, Val{false}())
         @synchronize()
         mma!(o_shm, s_shm, k_shm, cfg_out, tidx, mma_acc_fn)
         @synchronize()
@@ -118,7 +117,7 @@
     end
 
     # ---- write-back -------------------------------------------------------
-    if in_seq_bounds || in_q_seq_bounds
+    if in_seq_bounds || in_q
         @unroll for i in 1:emb_dim
             o[i, tidx + q_offset, gidx[2], gidx[3]] = o_shm[i, tidx]
         end
@@ -126,8 +125,6 @@
         ls[tidx + q_offset, gidx[2], gidx[3]] = l_i
     end
 end
-
-
 
 function _flash_attention(
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},

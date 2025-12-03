@@ -58,8 +58,7 @@
             # ---- add pair logits so that soft-max matches forward ------
             if !isnothing(pair)
                 @unroll for j in 1:gsz
-                    (in_seq_bounds || lo_k + j ≤ size(pair,3)) || break
-                    (in_seq_bounds || q_offset + tidx ≤ size(pair,2)) || break
+                    in_seq_bounds || (in_q_ok && lo_k + j ≤ size(k, 2)) || break
                     s_shm[tidx, j] += pair[gidx[1], q_offset + tidx, lo_k + j, gidx[2]]
                 end
             end
@@ -67,13 +66,13 @@
             # ---------------- causal / pad masks ------------------------
             if causal
                 @unroll for j in 1:gsz
-                    (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
+                    in_seq_bounds || j + lo_k ≤ size(k, 2) || break
                     s_shm[tidx, j] = tidx + q_offset ≥ j + lo_k ? s_shm[tidx, j] : typemin(T)
                 end
             end
             if !isnothing(kpad_mask)
                 @unroll for j in 1:gsz
-                    (in_seq_bounds || j + lo_k ≤ size(k, 2)) || break
+                    in_seq_bounds || j + lo_k ≤ size(k, 2) || break
                     valid = kpad_mask[j + lo_k, gidx[2]]
                     s_shm[tidx, j] = valid ? s_shm[tidx, j] : typemin(T)
                 end
@@ -118,7 +117,7 @@
                 row = tidx + lo_q
                 @unroll for j in 1:gsz
                     col = j + lo_k
-                    (in_seq_bounds || col ≤ size(dpair, 3)) || break
+                    in_seq_bounds || col ≤ size(dpair, 3) || break
                     if (in_seq_bounds || row ≤ size(dpair, 2))
                         dpair[gidx[1], row, col, gidx[2]] = s_shm[tidx, j] / scale
                     end
