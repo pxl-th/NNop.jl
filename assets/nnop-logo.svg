@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+  <rect x="44" y="52" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); fill: rgb(203, 60, 51);"/>
+  <rect x="154" y="52" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(64, 99, 216);"/>
+  <rect x="263" y="52" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(56, 152, 38);"/>
+  <rect x="370" y="52" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(149, 88, 178);"/>
+  <rect x="44" y="156" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(216, 216, 216);"/>
+  <rect x="154" y="156" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(149, 88, 178);"/>
+  <rect x="263" y="156" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(203, 60, 51);"/>
+  <rect x="370" y="156" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(56, 152, 38);"/>
+  <rect x="44" y="259" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(216, 216, 216);"/>
+  <rect x="154" y="259" width="89.62" height="89.62" style="fill: rgb(216, 216, 216); stroke: rgb(0, 0, 0); stroke-width: 1;"/>
+  <rect x="263" y="259" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(64, 99, 216);"/>
+  <rect x="370" y="259" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(149, 88, 178);"/>
+  <rect x="44" y="363" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(216, 216, 216);"/>
+  <rect x="154" y="363" width="89.62" height="89.62" style="fill: rgb(216, 216, 216); stroke: rgb(0, 0, 0); stroke-width: 1;"/>
+  <rect x="263" y="363" width="89.62" height="89.62" style="fill: rgb(216, 216, 216); stroke: rgb(0, 0, 0); stroke-width: 1;"/>
+  <rect x="370" y="363" width="89.62" height="89.62" style="stroke: rgb(0, 0, 0); stroke-width: 1; fill: rgb(203, 60, 51);"/>
+</svg>
