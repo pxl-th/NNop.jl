@@ -88,15 +88,12 @@
             @unroll for j in 1:gsz
                 s_shm[tidx, j] = exp(s_shm[tidx, j] - m_i)
             end
+            @synchronize()
 
             # -------------------- dV ------------------------------------
-            in_dv = in_seq_bounds || tidx + lo_k ≤ size(dv, 2)
-            # @unroll for i in 1:emb_dim
-            #     d_shm[i, tidx] = zero(T)
-            # end
-            @synchronize()
             mma!(d_shm, Δ_shm, s_shm, cfg_dv, tidx, mma_non_acc_fn)
             @synchronize()
+            in_dv = in_seq_bounds || tidx + lo_k ≤ size(dv, 2)
             if in_dv
                 @unroll for i in 1:emb_dim
                     if is_gqa
@@ -134,10 +131,6 @@
                 end
             end
             # -------------------- dK ------------------------------------
-            # @unroll for i in 1:emb_dim
-            #     d_shm[i, tidx] = zero(T)
-            # end
-            # @synchronize()
             mma!(d_shm, s_shm, q_shm, cfg_dk, tidx, mma_non_acc_fn)
             @synchronize()
             if in_k_ok
