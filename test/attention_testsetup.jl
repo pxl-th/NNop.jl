@@ -3,6 +3,8 @@
 export naive_softmax, att_padding_mask, naive_attention
 
 import ChainRulesCore as CRC
+
+using Einops
 using NNlib: ⊠, make_causal_mask, apply_attn_mask
 
 function naive_softmax(x; dims = 1)
@@ -17,6 +19,16 @@ function att_padding_mask(kpadmask, other_dim; T = Float32)
 end
 
 function naive_attention(q, k, v, pair = nothing; causal::Bool, kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing)
+    # Support grouped-query attention: expand KV heads to match query heads
+    QH, KVH = size(q, 3), size(k, 3)
+    if QH != KVH
+        @assert QH % KVH == 0 "Number of query heads must be divisible by number of KV heads"
+        num_q_per_kv = QH ÷ KVH
+        # Expand K and V by repeating each KV head num_q_per_kv times
+        k = repeat(k, Einops.einops"d l h ... -> d l (num_q_per_kv h) ..."; num_q_per_kv)
+        v = repeat(v, Einops.einops"d l h ... -> d l (num_q_per_kv h) ..."; num_q_per_kv)
+    end
+
     kt = permutedims(k, (2, 1, 3, 4))
     a = (kt ⊠ q) .* inv(sqrt(size(q, 1)))
     if causal

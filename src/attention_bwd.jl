@@ -1,18 +1,19 @@
 @kernel unsafe_indices=true cpu=false inbounds=true function _flash_attention_bwd!(
     cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
     dq::AbstractArray{T,4}, dk::AbstractArray{T,4}, dv::AbstractArray{T,4},
-    dpair::AbstractArray{T,4}, # ← grads for pairs
+    dpair::AbstractArray{T,4},
     Δ::AbstractArray{T,4}, δ::AbstractArray{T,3},
     o::AbstractArray{T,4}, ms::AbstractArray{T,3},
     q::AbstractArray{T,4}, k::AbstractArray{T,4}, v::AbstractArray{T,4},
     scale::T,
-    pair::Maybe{AbstractArray{T,4}}, # ← pair tensor
+    pair::Maybe{AbstractArray{T,4}},
     kpad_mask::Maybe{AbstractMatrix{Bool}},
-    ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal},
-) where {T, emb_dim, in_seq_bounds, causal}
+    ::Val{emb_dim}, ::Val{in_seq_bounds}, ::Val{causal}, ::Val{is_gqa},
+) where {T, emb_dim, in_seq_bounds, causal, is_gqa}
     gsz = @groupsize()[1]
     q_seq_tiles = cld(size(q, 2), gsz)
     kv_seq_tiles = cld(size(k, 2), gsz)
+    n_q_per_kv = size(q, 3) ÷ size(k, 3)
 
     # ------------------------------------------------------------------ shmem
     q_shm = @localmem Float16 (gsz, emb_dim)
@@ -24,10 +25,13 @@
     tidx = @index(Local)
     gidx = @index(Group, NTuple)          # (head, batch) in this kernel
 
-    @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}) where tr
+    q_head_idx = gidx[1]
+    kv_head_idx = cld(q_head_idx, n_q_per_kv)
+
+    @inline function sh_load_emb!(dest, src, offset, head_idx, mask::Bool, ::Val{tr}) where tr
         @unroll for i in 1:emb_dim
             x, y = tr ? (tidx, i) : (i, tidx)
-            @inbounds dest[x,y] = mask ? src[i, tidx+offset, gidx[1], gidx[2]] : zero(T)
+            @inbounds dest[x, y] = mask ? src[i, tidx + offset, head_idx, gidx[2]] : zero(T)
         end
     end
 
@@ -37,7 +41,7 @@
         q_offset = causal ? lo_k : 0                  # starting query row
 
         in_k_ok = in_seq_bounds || tidx + lo_k ≤ size(k,2)
-        sh_load_emb!(k_shm, k, lo_k, in_k_ok, Val(false))
+        sh_load_emb!(k_shm, k, lo_k, kv_head_idx, in_k_ok, Val(false))
         @synchronize()
 
         start_m = causal ? start_n : 1                # iterate query-tiles
@@ -46,8 +50,8 @@
 
             # ------------- load Δ and Q ---------------------------------
             in_q_ok = in_seq_bounds || tidx + q_offset ≤ size(q,2)
-            sh_load_emb!(Δ_shm, Δ, q_offset, in_q_ok, Val(false))
-            sh_load_emb!(q_shm, q, q_offset, in_q_ok, Val(true))
+            sh_load_emb!(Δ_shm, Δ, q_offset, q_head_idx, in_q_ok, Val(false))
+            sh_load_emb!(q_shm, q, q_offset, q_head_idx, in_q_ok, Val(true))
             @synchronize()
 
             # ------------- recompute raw scores -------------------------
@@ -59,7 +63,7 @@
             if !isnothing(pair)
                 @unroll for j in 1:gsz
                     in_seq_bounds || (in_q_ok && lo_k + j ≤ size(k, 2)) || break
-                    s_shm[tidx, j] += pair[gidx[1], q_offset + tidx, lo_k + j, gidx[2]]
+                    s_shm[tidx, j] += pair[q_head_idx, q_offset + tidx, lo_k + j, gidx[2]]
                 end
             end
 
@@ -80,31 +84,34 @@
 
             # ---------------- soft-max reconstruction -------------------
             in_ms = in_seq_bounds || tidx + lo_q ≤ size(ms,1)
-            m_i   = in_ms ? ms[tidx + lo_q, gidx[1], gidx[2]] : typemax(T)
+            m_i   = in_ms ? ms[tidx + lo_q, q_head_idx, gidx[2]] : typemax(T)
             @unroll for j in 1:gsz
                 s_shm[tidx, j] = exp(s_shm[tidx, j] - m_i)
             end
+            @synchronize()
 
             # -------------------- dV ------------------------------------
-            in_dv = in_seq_bounds || tidx + lo_k ≤ size(dv,2)
-            sh_load_emb!(d_shm, dv, lo_k, in_dv, Val(false))
+            mma!(d_shm, Δ_shm, s_shm, cfg_dv, tidx, mma_non_acc_fn)
             @synchronize()
-            mma!(d_shm, Δ_shm, s_shm, cfg_dv, tidx, mma_acc_fn)
-            @synchronize()
+            in_dv = in_seq_bounds || tidx + lo_k ≤ size(dv, 2)
             if in_dv
                 @unroll for i in 1:emb_dim
-                    dv[i, tidx + lo_k, gidx[1], gidx[2]] = d_shm[i, tidx]
+                    if is_gqa
+                        KA.@atomic dv[i, tidx + lo_k, kv_head_idx, gidx[2]] += d_shm[i, tidx]
+                    else
+                        dv[i, tidx + lo_k, kv_head_idx, gidx[2]] += d_shm[i, tidx]
+                    end
                 end
             end
 
             # -------------------- dS (back into s_shm) -------------------
-            sh_load_emb!(d_shm, v, lo_k, in_dv, Val(false))
+            sh_load_emb!(d_shm, v, lo_k, kv_head_idx, in_dv, Val(false))
             @synchronize()
             # TODO prefetch δ?
             mma!(s_shm, Δ_shm, d_shm, cfg_ds, tidx,
                  (res, out, x, y) -> begin
                      d_i = if in_seq_bounds || x + lo_q ≤ size(δ, 1)
-                         @inbounds δ[x + lo_q, gidx[1], gidx[2]]
+                         @inbounds δ[x + lo_q, q_head_idx, gidx[2]]
                      else
                          zero(T)
                      end
@@ -119,30 +126,32 @@
                     col = j + lo_k
                     in_seq_bounds || col ≤ size(dpair, 3) || break
                     if (in_seq_bounds || row ≤ size(dpair, 2))
-                        dpair[gidx[1], row, col, gidx[2]] = s_shm[tidx, j] / scale
+                        dpair[q_head_idx, row, col, gidx[2]] = s_shm[tidx, j] / scale
                     end
                 end
             end
             # -------------------- dK ------------------------------------
-            sh_load_emb!(d_shm, dk, lo_k, in_k_ok, Val(false))
-            @synchronize()
-            mma!(d_shm, s_shm, q_shm, cfg_dk, tidx, mma_acc_fn)
+            mma!(d_shm, s_shm, q_shm, cfg_dk, tidx, mma_non_acc_fn)
             @synchronize()
             if in_k_ok
                 @unroll for i in 1:emb_dim
-                    dk[i, tidx + lo_k, gidx[1], gidx[2]] = d_shm[i,tidx]
+                    if is_gqa
+                        KA.@atomic dk[i, tidx + lo_k, kv_head_idx, gidx[2]] += d_shm[i,tidx]
+                    else
+                        dk[i, tidx + lo_k, kv_head_idx, gidx[2]] += d_shm[i,tidx]
+                    end
                 end
             end
 
             # -------------------- dQ ------------------------------------
             in_dq = in_seq_bounds || tidx + lo_q ≤ size(dq, 2)
-            sh_load_emb!(d_shm, dq, lo_q, in_dq, Val(false))
+            sh_load_emb!(d_shm, dq, lo_q, q_head_idx, in_dq, Val(false))
             @synchronize()
             mma!(d_shm, s_shm, k_shm, cfg_dq, tidx, mma_acc_fn)
             @synchronize()
             if in_dq
                 @unroll for i in 1:emb_dim
-                    dq[i, tidx + lo_q, gidx[1], gidx[2]] = d_shm[i,tidx]
+                    dq[i, tidx + lo_q, q_head_idx, gidx[2]] = d_shm[i,tidx]
                 end
             end
 
@@ -195,23 +204,30 @@ function ∇flash_attention(
     causal::Bool,
     kpad_mask::Maybe{AbstractMatrix{Bool}} = nothing,
 ) where T
-    emb_dim, QL, H, B = size(q)
-    KL                = size(k, 2)
+    QE, QL, QH, B = size(q)
+    KE, KL, KH, KB = size(k)
+
+    QE == KE || error("Embedding dim of Q `$QE` must be the same as of K `$KE`.")
+    size(k) == size(v) || error("Shapes of K `$(size(k))` and V `$(size(v))` must be the same.")
+    ispow2(QE) || error("Only power-of-2 embedding dims are supported.")
+    QH % KH == 0 || error("Number of query heads `$QH` must be divisible by number of KV heads `$KH`.")
 
     kab          = get_backend(q)
     target_shmem = shared_memory(kab, KA.device(kab))
-    gsz          = flash_attention_groupsize(T; emb_dim, target_shmem)
+    gsz          = flash_attention_groupsize(T; emb_dim=QE, target_shmem)
 
     q_tiles, k_tiles = cld.((QL, KL), gsz)
     in_bounds = QL % gsz == 0 && KL % gsz == 0
-    scale     = T(inv(sqrt(emb_dim)))
+    scale     = T(inv(sqrt(QE)))
 
     # ---------------- preprocess -----------------------------------------
-    Δ_scaled = similar(Δ);  δ = similar(ls)
-    threads  = (gsz,1,1);   ndrange = (gsz*q_tiles, H, B)
+    Δ_scaled = similar(Δ)
+    δ = similar(ls)
+    threads = (gsz, 1, 1)
+    ndrange = (gsz * q_tiles, QH, B)
     _flash_attention_bwd_preprocess!(kab, threads)(
         Δ_scaled, δ, Δ, o, ls,
-        Val(emb_dim), Val(in_bounds); ndrange)
+        Val(QE), Val(in_bounds); ndrange)
 
     # ---------------- output grads ---------------------------------------
     dq = KA.zeros(kab, T, size(q))
@@ -222,26 +238,29 @@ function ∇flash_attention(
         KA.zeros(kab, T, size(pair))
 
     # ---------------- MMA configs (unchanged) ----------------------------
-    BM,BK,BN = gsz, emb_dim, gsz
+    BM,BK,BN = gsz, QE, gsz
     TM,TN    = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg      = FATileConfig{BM,BK,BN,TM,TN,false,false,false}
 
-    BM,BK,BN = emb_dim, gsz, gsz
+    BM,BK,BN = QE, gsz, gsz
     TM,TN    = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_dv   = FATileConfig{BM,BK,BN,TM,TN,false,false,false}
 
-    BM,BK,BN = gsz, gsz, emb_dim
+    BM,BK,BN = gsz, gsz, QE
     TM,TN    = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_dk   = FATileConfig{BM,BK,BN,TM,TN,true,false,true}
     cfg_dq   = FATileConfig{BM,BK,BN,TM,TN,false,true,true}
 
-    BM,BK,BN = gsz, emb_dim, gsz
+    BM,BK,BN = gsz, QE, gsz
     TM,TN    = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_ds   = FATileConfig{BM,BK,BN,TM,TN,true,false,false}
 
+    # If Grouped-Query attention, use atomic accumulation in gradients.
+    is_gqa = QH ÷ KH > 1
+
     # ---------------- launch kernel --------------------------------------
     threads = (gsz, 1)
-    ndrange = (gsz * H, B)
+    ndrange = (gsz * QH, B)
     _flash_attention_bwd!(kab, threads)(
         cfg, cfg_dv, cfg_dk, cfg_dq, cfg_ds,
         dq, dk, dv, dp,
@@ -249,7 +268,7 @@ function ∇flash_attention(
         o, ms,
         q, k, v, scale,
         pair, kpad_mask,
-        Val(emb_dim), Val(in_bounds), Val(causal);
+        Val(QE), Val(in_bounds), Val(causal), Val(is_gqa);
         ndrange)
 
     return dq, dk, dv, (isnothing(pair) ? nothing : dp)

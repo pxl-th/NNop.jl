@@ -1,9 +1,10 @@
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+Einops = "e3ce28c8-8bfb-4704-8add-e3e7f14b55c9"
 NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
 Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+ReTestItems = "817f1d60-ba6b-4fd5-9520-3cf149f6a823"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
-ReTestItems = "817f1d60-ba6b-4fd5-9520-3cf149f6a823"
-ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
