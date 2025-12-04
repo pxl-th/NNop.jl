@@ -2,11 +2,6 @@
 
 <img src="assets/nnop-logo.svg" width="200"/>
 
-|GPU Backend|CI Status|
-|-|-|
-|[AMDGPU](https://github.com/JuliaGPU/AMDGPU.jl)|[![][buildkite-img-amdgpu]][buildkite-url]|
-|[CUDA](https://github.com/JuliaGPU/CUDA.jl)|[![][buildkite-img-cuda]][buildkite-url]|
-
 [buildkite-img]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?branch=master
 [buildkite-img-amdgpu]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?branch=master&step=AMDGPU%20-%20Julia%201.12
 [buildkite-img-cuda]: https://badge.buildkite.com/b30cae2b9773cfd3464e6dad35de6a4a7151a6cb161da14c33.svg?branch=master&step=CUDA%20-%20Julia%201.12
@@ -19,6 +14,11 @@ Fused kernels (with [ChainRules.jl](https://github.com/JuliaDiff/ChainRules.jl) 
 - [RMS Norm](#rms-norm)
 - [Layer Norm](#layer-norm)
 - [Llama RoPE](#llama-rope)
+
+|GPU Backend|CI Status|
+|-|-|
+|[AMDGPU](https://github.com/JuliaGPU/AMDGPU.jl)|[![][buildkite-img-amdgpu]][buildkite-url]|
+|[CUDA](https://github.com/JuliaGPU/CUDA.jl)|[![][buildkite-img-cuda]][buildkite-url]|
 
 ## Benchmarking
 
