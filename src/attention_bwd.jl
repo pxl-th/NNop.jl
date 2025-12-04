@@ -91,6 +91,10 @@
 
             # -------------------- dV ------------------------------------
             in_dv = in_seq_bounds || tidx + lo_k ≤ size(dv, 2)
+            # @unroll for i in 1:emb_dim
+            #     d_shm[i, tidx] = zero(T)
+            # end
+            @synchronize()
             mma!(d_shm, Δ_shm, s_shm, cfg_dv, tidx, mma_non_acc_fn)
             @synchronize()
             if in_dv
@@ -130,6 +134,10 @@
                 end
             end
             # -------------------- dK ------------------------------------
+            # @unroll for i in 1:emb_dim
+            #     d_shm[i, tidx] = zero(T)
+            # end
+            # @synchronize()
             mma!(d_shm, s_shm, q_shm, cfg_dk, tidx, mma_non_acc_fn)
             @synchronize()
             if in_k_ok
