@@ -11,6 +11,7 @@
 ) where {T, emb_dim, in_seq_bounds, causal}
     gsz = @groupsize()[1]
     kv_seq_tiles = cld(size(k, 2), gsz)
+    n_q_per_kv = size(q, 3) ÷ size(k, 3)
 
     # shared-memory buffers ------------------------------------------------
     q_shm = @localmem T (gsz, emb_dim)
@@ -23,15 +24,18 @@
     q_offset = (gidx[1] - 1) * gsz
     in_q = in_seq_bounds || q_offset + tidx ≤ size(q, 2)
 
-    @inline function sh_load_emb!(dest, src, offset, mask::Bool, ::Val{tr}) where tr
+    q_head_idx = gidx[2]
+    kv_head_idx = cld(q_head_idx, n_q_per_kv)
+
+    @inline function sh_load_emb!(dest, src, offset, head_idx, mask::Bool, ::Val{tr}) where tr
         @unroll for i in 1:emb_dim
             x, y = tr ? (tidx, i) : (i, tidx)
-            @inbounds dest[x, y] = mask ? src[i, tidx + offset, gidx[2], gidx[3]] : zero(T)
+            @inbounds dest[x, y] = mask ? src[i, tidx + offset, head_idx, gidx[3]] : zero(T)
         end
     end
 
     # Load `q` --------------------------------------------------------------
-    sh_load_emb!(q_shm, q, q_offset, in_q, Val{true}())
+    sh_load_emb!(q_shm, q, q_offset, q_head_idx, in_q, Val{true}())
     @unroll for i in 1:emb_dim
         o_shm[i, tidx] = zero(T)
     end
@@ -44,7 +48,7 @@
 
     for _ in 1:end_iter
         in_k = in_seq_bounds || k_offset + tidx ≤ size(k, 2)
-        sh_load_emb!(k_shm, k, k_offset, in_k, Val{false}())
+        sh_load_emb!(k_shm, k, k_offset, kv_head_idx, in_k, Val{false}())
         @synchronize()
 
         # ---- scaled Q · Kᵀ ------------------------------------------------
@@ -55,7 +59,7 @@
         if !isnothing(pair)
             @unroll for i in 1:gsz
                 in_seq_bounds || (in_q && k_offset + i ≤ size(k, 2)) || break
-                s_shm[tidx, i] += pair[gidx[2], q_offset + tidx, k_offset + i, gidx[3]]
+                s_shm[tidx, i] += pair[q_head_idx, q_offset + tidx, k_offset + i, gidx[3]]
             end
         end
 
@@ -106,7 +110,7 @@
         end
 
         # ---- P · V --------------------------------------------------------
-        sh_load_emb!(k_shm, v, k_offset, in_k, Val{false}())
+        sh_load_emb!(k_shm, v, k_offset, kv_head_idx, in_k, Val{false}())
         @synchronize()
         mma!(o_shm, s_shm, k_shm, cfg_out, tidx, mma_acc_fn)
         @synchronize()
@@ -119,10 +123,10 @@
     # ---- write-back -------------------------------------------------------
     if in_seq_bounds || in_q
         @unroll for i in 1:emb_dim
-            o[i, tidx + q_offset, gidx[2], gidx[3]] = o_shm[i, tidx]
+            o[i, tidx + q_offset, q_head_idx, gidx[3]] = o_shm[i, tidx]
         end
-        ms[tidx + q_offset, gidx[2], gidx[3]] = m_i
-        ls[tidx + q_offset, gidx[2], gidx[3]] = l_i
+        ms[tidx + q_offset, q_head_idx, gidx[3]] = m_i
+        ls[tidx + q_offset, q_head_idx, gidx[3]] = l_i
     end
 end
 
@@ -131,39 +135,42 @@ function _flash_attention(
     pair::Union{Nothing,AbstractArray{T,4}} = nothing;
     causal::Bool, kpad_mask::Union{Nothing,AbstractMatrix{Bool}} = nothing,
 ) where T
-    emb_dim, QL, H, B = size(q)
-    KL = size(k, 2)
-    @assert size(k) == size(v)
-    ispow2(emb_dim) || error("Only power-of-2 embedding dims are supported.")
+    QE, QL, QH, B = size(q)
+    KE, KL, KH, KB = size(k)
+
+    QE == KE || error("Embedding dim of Q `$QE` must be the same as of K `$KE`.")
+    size(k) == size(v) || error("Shapes of K `$(size(k))` and V `$(size(v))` must be the same.")
+    ispow2(QE) || error("Only power-of-2 embedding dims are supported.")
+    QH % KH == 0 || error("Number of query heads `$QH` must be divisible by number of KV heads `$KH`.")
 
     kab          = get_backend(q)
     target_shmem = shared_memory(kab, KA.device(kab))
-    gsz          = flash_attention_groupsize(T; emb_dim, target_shmem)
+    gsz          = flash_attention_groupsize(T; emb_dim=QE, target_shmem)
 
     q_seq_tiles, kv_seq_tiles = cld.((QL, KL), gsz)
     threads   = (gsz, 1, 1)
-    ndrange   = (gsz * q_seq_tiles, H, B)
+    ndrange   = (gsz * q_seq_tiles, QH, B)
     in_bounds = QL % gsz == 0 && KL % gsz == 0
-    scale     = T(inv(sqrt(emb_dim)))
+    scale     = T(inv(sqrt(QE)))
 
     # mma tile configs ------------------------------------------------------
-    BM, BK, BN = gsz, emb_dim, gsz
+    BM, BK, BN = gsz, QE, gsz
     TM, TN     = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg        = FATileConfig{BM,BK,BN,TM,TN,false,false,false}
 
-    BM, BK, BN = gsz, gsz, emb_dim
+    BM, BK, BN = gsz, gsz, QE
     TM, TN     = flash_attention_mma_thread_cfg(gsz; BM, BN)
     cfg_out    = FATileConfig{BM,BK,BN,TM,TN,false,true,true}
 
     # ----------------------------------------------------------------------
     o  = similar(q)
-    ms = KA.allocate(kab, eltype(o), (QL,H,B))
-    ls = KA.allocate(kab, eltype(o), (QL,H,B))
+    ms = KA.allocate(kab, eltype(o), (QL, QH, B))
+    ls = KA.allocate(kab, eltype(o), (QL, QH, B))
 
     _flash_attention_fwd!(kab, threads)(
         cfg, cfg_out,
         o, ms, ls, q, k, v, scale, pair, kpad_mask,
-        Val(emb_dim), Val(in_bounds), Val(causal);   # flags
+        Val(QE), Val(in_bounds), Val(causal);   # flags
         ndrange)
 
     return o, ms, ls
