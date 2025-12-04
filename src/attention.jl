@@ -86,21 +86,40 @@
         end
 
         l_ij = zero(T)
-        @unroll for i in 1:gsz
-            (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
-            tmp = exp(s_shm[tidx, i] - m_ij)
-            l_ij += tmp
-            s_shm[tidx, i] = tmp
+        if m_ij == typemin(T)
+            # If all considered logits are effectively -Inf for this row,
+            # avoid exp(-Inf - -Inf) = NaN and produce a zero-probability tile.
+            @unroll for i in 1:gsz
+                (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
+                s_shm[tidx, i] = zero(T)
+            end
+        else
+            @unroll for i in 1:gsz
+                (in_seq_bounds || k_offset + i ≤ size(k, 2)) || break
+                tmp = exp(s_shm[tidx, i] - m_ij)
+                l_ij += tmp
+                s_shm[tidx, i] = tmp
+            end
         end
         @synchronize()
 
         m_i_new = max(m_i, m_ij)
-        α = exp(m_i - m_i_new)
-        β = exp(m_ij - m_i_new)
-        l_i_new = α * l_i + β * l_ij
+        if l_i == zero(T) && l_ij == zero(T)
+            # No valid keys encountered so far and none in this tile;
+            # keep running sums unchanged without introducing NaNs.
+            α = one(T)
+            β = zero(T)
+            l_i_new = zero(T)
+        else
+            α = exp(m_i - m_i_new)
+            β = exp(m_ij - m_i_new)
+            l_i_new = α * l_i + β * l_ij
+        end
 
-        p_scale = β / l_i_new
-        o_scale = l_i / l_i_new * α
+        # Guard against 0/0 when there are no valid keys seen so far.
+        den = l_i_new
+        p_scale = den == zero(T) ? zero(T) : β / den
+        o_scale = den == zero(T) ? one(T)  : (l_i / den * α)
 
         @unroll for i in 1:gsz
             s_shm[tidx, i] *= p_scale
